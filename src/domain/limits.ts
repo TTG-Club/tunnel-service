@@ -8,17 +8,24 @@ export interface TierLimits {
 }
 
 /**
- * Тарифы. Это не биллинг: деньги считает subscriber.api, здесь только
- * технические лимиты, которые уезжают в тикет и которые проверяет нода.
+ * Тарифы.
+ *
+ * Сейчас тариф ровно один: без активной подписки сервисом воспользоваться
+ * нельзя, урезанного бесплатного режима нет. Таблица оставлена таблицей, а не
+ * схлопнута в константу, чтобы добавление второго тарифа было строчкой здесь:
+ * поле `tier` в тикете и чтение `tier` из subscriber.api уже работают.
  */
 export const TIERS: Readonly<Record<string, TierLimits>> = {
-  free: { maxStreams: 50, maxWorlds: 1, quotaGb: 5 },
-  pro: { maxStreams: 200, maxWorlds: 5, quotaGb: 50 },
+  pro: { maxStreams: 1000, maxWorlds: 5, quotaGb: 10_240 },
 };
 
 export interface ResolvedTier {
   readonly name: string;
   readonly limits: TierLimits;
+}
+
+export function isKnownTier(name: string): boolean {
+  return Object.hasOwn(TIERS, name);
 }
 
 /**
@@ -46,6 +53,10 @@ export function resolveTier(raw: string | null | undefined, defaultTier: string,
 
 export const BYTES_IN_GB = 1_000_000_000n;
 
+export function quotaBytes(limits: TierLimits): bigint {
+  return BigInt(limits.quotaGb) * BYTES_IN_GB;
+}
+
 /**
  * Сколько гигабайт квоты осталось.
  *
@@ -54,8 +65,14 @@ export const BYTES_IN_GB = 1_000_000_000n;
  * 0 ГБ, и выдача тикета отказывала бы человеку, у которого квота ещё есть.
  */
 export function quotaLeftGb(limits: TierLimits, usedBytes: bigint): number {
-  const quotaBytes = BigInt(limits.quotaGb) * BYTES_IN_GB;
-  const left = quotaBytes - usedBytes;
+  const left = quotaBytes(limits) - usedBytes;
   if (left <= 0n) return 0;
   return Math.ceil(Number(left) / Number(BYTES_IN_GB));
+}
+
+/** Доля израсходованной квоты в процентах, для порога предупреждения. */
+export function usedPercent(limits: TierLimits, usedBytes: bigint): number {
+  const quota = quotaBytes(limits);
+  if (quota <= 0n) return 100;
+  return Number((usedBytes * 100n) / quota);
 }

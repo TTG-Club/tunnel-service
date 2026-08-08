@@ -6,7 +6,7 @@ export type TicketAlg = 'EdDSA' | 'ES256';
 
 export interface AppConfig {
   readonly env: NodeEnv;
-  readonly http: { readonly host: string; readonly port: number };
+  readonly http: { readonly host: string; readonly port: number; readonly trustProxy: boolean };
   readonly logLevel: LogLevel;
   readonly shutdownTimeoutMs: number;
   readonly db: { readonly url: string; readonly poolMax: number; readonly ssl: boolean };
@@ -39,7 +39,22 @@ export interface AppConfig {
     readonly sharedSecret: string;
     readonly heartbeatTimeoutSeconds: number;
   };
-  readonly slug: { readonly stoplistPath: string };
+  readonly slug: {
+    readonly stoplistPath: string;
+    /** Соль для суффиксов слагов миров. Менять нельзя, см. README. */
+    readonly salt: string;
+  };
+  readonly rateLimit: {
+    readonly ticketPerAccount: number;
+    readonly ticketPerIp: number;
+    readonly windowSeconds: number;
+  };
+  readonly quota: {
+    /** С какого процента расхода писать warning. */
+    readonly warnPercent: number;
+    /** Прирост за сутки, после которого расход помечается подозрительным. */
+    readonly spikeGbPerDay: number;
+  };
 }
 
 export class ConfigError extends Error {
@@ -65,6 +80,10 @@ const schema = z.object({
 
   HTTP_HOST: z.string().min(1).default('0.0.0.0'),
   HTTP_PORT: envInt(3000, 1, 65535),
+  // За Dokploy/Traefik реальный адрес клиента приходит в X-Forwarded-For.
+  // Если сервис когда-нибудь будет смотреть в интернет напрямую — выключить,
+  // иначе заголовок можно подделать и обойти лимит по IP.
+  TRUST_PROXY: envBool(true),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   SHUTDOWN_TIMEOUT_MS: envInt(15_000, 0, 300_000),
 
@@ -104,6 +123,16 @@ const schema = z.object({
   NODE_HEARTBEAT_TIMEOUT_SECONDS: envInt(90, 10, 3600),
 
   SLUG_STOPLIST_PATH: z.string().min(1).default('data/stoplist.txt'),
+  SLUG_SALT: z
+    .string()
+    .min(16, 'должна быть не короче 16 символов (npm run gen:salt). Менять её нельзя — см. README'),
+
+  TICKET_RATE_LIMIT_PER_ACCOUNT: envInt(20, 1, 10_000),
+  TICKET_RATE_LIMIT_PER_IP: envInt(60, 1, 100_000),
+  TICKET_RATE_LIMIT_WINDOW_SECONDS: envInt(60, 1, 3600),
+
+  QUOTA_WARN_PERCENT: envInt(80, 1, 100),
+  QUOTA_SPIKE_GB_PER_DAY: envInt(100, 1, 1_000_000),
 });
 
 /**
@@ -161,7 +190,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   return {
     env: raw.NODE_ENV,
-    http: { host: raw.HTTP_HOST, port: raw.HTTP_PORT },
+    http: { host: raw.HTTP_HOST, port: raw.HTTP_PORT, trustProxy: raw.TRUST_PROXY },
     logLevel: raw.LOG_LEVEL,
     shutdownTimeoutMs: raw.SHUTDOWN_TIMEOUT_MS,
     db: { url: raw.DATABASE_URL, poolMax: raw.DATABASE_POOL_MAX, ssl: raw.DATABASE_SSL },
@@ -193,7 +222,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       sharedSecret: raw.NODE_SHARED_SECRET,
       heartbeatTimeoutSeconds: raw.NODE_HEARTBEAT_TIMEOUT_SECONDS,
     },
-    slug: { stoplistPath: raw.SLUG_STOPLIST_PATH },
+    slug: { stoplistPath: raw.SLUG_STOPLIST_PATH, salt: raw.SLUG_SALT },
+    rateLimit: {
+      ticketPerAccount: raw.TICKET_RATE_LIMIT_PER_ACCOUNT,
+      ticketPerIp: raw.TICKET_RATE_LIMIT_PER_IP,
+      windowSeconds: raw.TICKET_RATE_LIMIT_WINDOW_SECONDS,
+    },
+    quota: {
+      warnPercent: raw.QUOTA_WARN_PERCENT,
+      spikeGbPerDay: raw.QUOTA_SPIKE_GB_PER_DAY,
+    },
   };
 }
 

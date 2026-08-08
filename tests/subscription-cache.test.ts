@@ -204,16 +204,22 @@ describe('тариф', () => {
   });
 
   it('известный tier применяется как есть', () => {
-    const tier = resolveTier('free', 'pro', capturingLogger());
-    expect(tier.name).toBe('free');
-    expect(tier.limits.quotaGb).toBe(5);
+    const tier = resolveTier('pro', 'pro', capturingLogger());
+
+    expect(tier.name).toBe('pro');
+    // Цифры беты: 5 миров, 1000 потоков, 10 ТБ в месяц.
+    expect(tier.limits).toEqual({ maxWorlds: 5, maxStreams: 1000, quotaGb: 10_240 });
+  });
+
+  it('бесплатного тарифа нет: без подписки сервисом не пользуются', () => {
+    expect(Object.keys(TIERS)).toEqual(['pro']);
   });
 
   it('ноль остатка означает ровно «квота исчерпана»', () => {
     const limits = TIERS['pro'] as TierLimits;
     const quota = BigInt(limits.quotaGb) * BYTES_IN_GB;
 
-    expect(quotaLeftGb(limits, 0n)).toBe(50);
+    expect(quotaLeftGb(limits, 0n)).toBe(limits.quotaGb);
     // Остались последние мегабайты — это ещё не исчерпанная квота.
     expect(quotaLeftGb(limits, quota - 1n)).toBe(1);
     expect(quotaLeftGb(limits, quota)).toBe(0);

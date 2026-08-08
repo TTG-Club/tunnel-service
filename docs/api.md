@@ -21,6 +21,7 @@
 | `subscription_inactive` | 403 | подписки нет или она неактивна |
 | `worlds_limit_exceeded` | 403 | миров в запросе больше, чем позволяет тариф |
 | `quota_exceeded` | 403 | квота трафика за месяц исчерпана |
+| `rate_limited` | 429 | слишком много запросов тикета; в ответе `Retry-After` |
 | `auth_unavailable` | 503 | не смогли забрать JWKS auth-сервиса |
 | `subscription_unavailable` | 503 | сервис подписок недоступен и кэша нет |
 | `no_nodes_available` | 503 | нет ни одной живой ноды |
@@ -67,7 +68,7 @@
     }
   ],
   "tier": "pro",
-  "limits": { "maxStreams": 200, "maxWorlds": 5, "quotaGb": 50, "quotaLeftGb": 38 },
+  "limits": { "maxStreams": 1000, "maxWorlds": 5, "quotaGb": 10240, "quotaLeftGb": 10237 },
   "subscription": {
     "active": true,
     "registered": true,
@@ -84,13 +85,16 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 Порядок проверок (важен: слаг и тикет не появляются раньше, чем подтверждена
 подписка):
 
-1. токен пользователя;
-2. активная подписка — иначе `subscription_inactive`;
-3. тариф и число миров — иначе `worlds_limit_exceeded`;
-4. остаток квоты — иначе `quota_exceeded`;
-5. живая нода — иначе `no_nodes_available`;
-6. слаги аккаунта и миров;
-7. подпись тикета.
+1. лимит по IP — иначе `rate_limited`;
+2. токен пользователя;
+3. лимит по аккаунту (до похода в subscriber.api) — иначе `rate_limited`;
+4. активная подписка — иначе `subscription_inactive`. **Без активной подписки
+   тикет не выдаётся и слаг аккаунту не заводится**;
+5. тариф и число миров — иначе `worlds_limit_exceeded`;
+6. остаток квоты — иначе `quota_exceeded`;
+7. живая нода — иначе `no_nodes_available`;
+8. слаги аккаунта и миров;
+9. подпись тикета.
 
 ### GET /api/tunnel/status
 
@@ -99,18 +103,18 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 
 ```json
 {
-  "accountId": "12345",
+  "accountId": "018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b",
   "slug": "ivan",
   "host": "ivan.play.ttg.club",
   "tier": "pro",
-  "limits": { "maxStreams": 200, "maxWorlds": 5, "quotaGb": 50, "quotaLeftGb": 38 },
+  "limits": { "maxStreams": 1000, "maxWorlds": 5, "quotaGb": 10240, "quotaLeftGb": 10237 },
   "quota": {
     "period": "2026-08",
     "bytesIn": "1000000000",
     "bytesOut": "2000000000",
     "usedGb": 3,
-    "quotaGb": 50,
-    "leftGb": 47
+    "quotaGb": 10240,
+    "leftGb": 10237
   },
   "worlds": [{ "worldId": "abc123", "slug": "ivan-a7k2m9", "host": "ivan-a7k2m9.play.ttg.club" }],
   "subscription": { "active": true, "registered": true, "expiresAt": null, "source": "cache" }
@@ -125,6 +129,11 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 
 Авторизация: `Authorization: Bearer <NODE_SHARED_SECRET>`. Пользовательский JWT
 здесь не принимается.
+
+Секрет пока общий для всех нод: это значит, что нода может прислать данные от
+имени другой ноды. В таблице `nodes` уже заведена пустая колонка `token_hash`
+под персональный токен — чтобы переход на них не требовал миграции на живых
+нодах. Код её пока не использует.
 
 ### POST /api/internal/nodes/heartbeat
 
@@ -151,7 +160,7 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 {
   "nodeId": "eu-1",
   "items": [
-    { "accountId": "12345", "period": "2026-08", "bytesIn": "1000000000", "bytesOut": "2000000000" }
+    { "accountId": "018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b", "period": "2026-08", "bytesIn": "1000000000", "bytesOut": "2000000000" }
   ]
 }
 ```
@@ -167,10 +176,15 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 замрёт до следующего месяца. В ответе такие случаи видны как `regressions`, в
 логах — warning.
 
-Числа принимаются и строкой, и числом; строка предпочтительна. До 5000 записей
-в батче, тело до 1 МБ.
+`accountId` — UUID (claim `sub` токена пользователя). Байты принимаются и
+строкой, и числом; строка предпочтительна. До 5000 записей в батче, тело до
+1 МБ.
 
 Ответ: `{ "ok": true, "applied": 2, "accounts": 2, "regressions": 0 }`.
+
+По приросту расхода сервис пишет сигналы в лог (`suspicious: true`) — при
+превышении `QUOTA_SPIKE_GB_PER_DAY` за сутки и при расходе выше
+`QUOTA_WARN_PERCENT` от квоты. Ничего не блокируется автоматически.
 
 ---
 
@@ -218,11 +232,11 @@ RFC 7638 thumbprint публичного ключа.
 
 ```json
 {
-  "sub": "12345",
+  "sub": "018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b",
   "slug": "ivan",
   "node": "eu-1",
   "hosts": ["ivan", "ivan-a7k2m9"],
-  "limits": { "max_streams": 200, "max_worlds": 5, "quota_left_gb": 38 },
+  "limits": { "max_streams": 1000, "max_worlds": 5, "quota_left_gb": 10237 },
   "tier": "pro",
   "iss": "tunnel.ttg.club",
   "aud": "ttg-tunnel-node",

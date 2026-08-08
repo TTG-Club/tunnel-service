@@ -1,12 +1,16 @@
 import { readFileSync } from 'node:fs';
 import type { AppConfig } from './config.js';
 import { createPool, type Pool } from './db/pool.js';
+import { TIERS, isKnownTier } from './domain/limits.js';
 import { createNodeRepository, type NodeRepository } from './domain/nodes/repository.js';
 import { createSlugRepository, type SlugRepository } from './domain/slug/repository.js';
 import { createSlugService, type SlugService } from './domain/slug/service.js';
 import { loadStopList } from './domain/slug/stoplist.js';
 import { createTicketKeyring, type TicketKeyring } from './domain/ticket/keys.js';
+import { createAbuseWatcher, type AbuseWatcher } from './domain/usage/abuse.js';
+import { BYTES_IN_GB } from './domain/limits.js';
 import { createUsageRepository, type UsageRepository } from './domain/usage/repository.js';
+import { createRateLimiter, type RateLimiter } from './http/rate-limit.js';
 import type { Logger } from './logger.js';
 import { createUserTokenVerifier, type UserTokenVerifier } from './upstream/auth.js';
 import { createSubscriptionService, type SubscriptionService } from './upstream/subscriber.js';
@@ -28,6 +32,8 @@ export interface AppServices {
   readonly usage: UsageRepository;
   readonly subscription: SubscriptionService;
   readonly auth: UserTokenVerifier;
+  readonly rateLimit: { readonly byAccount: RateLimiter; readonly byIp: RateLimiter };
+  readonly abuse: AbuseWatcher;
   readonly lifecycle: Lifecycle;
 }
 
@@ -48,6 +54,13 @@ function readVersion(): string {
  * подписи, стоп-лист), падает здесь — до того, как сервис начнёт слушать порт.
  */
 export async function createServices(config: AppConfig, logger: Logger): Promise<AppServices> {
+  if (!isKnownTier(config.subscriber.defaultTier)) {
+    throw new Error(
+      `SUBSCRIPTION_DEFAULT_TIER=${config.subscriber.defaultTier}: неизвестный тариф. ` +
+        `Доступны: ${Object.keys(TIERS).join(', ')}`,
+    );
+  }
+
   const pool = createPool(config, logger);
   const keyring = await createTicketKeyring(config);
   const stopList = loadStopList(config.slug.stoplistPath, logger);
@@ -67,11 +80,29 @@ export async function createServices(config: AppConfig, logger: Logger): Promise
     pool,
     keyring,
     slugRepository,
-    slugs: createSlugService({ repository: slugRepository, stopList, logger }),
+    slugs: createSlugService({
+      repository: slugRepository,
+      stopList,
+      logger,
+      salt: config.slug.salt,
+    }),
     nodes: createNodeRepository(pool),
     usage: createUsageRepository(pool),
     subscription: createSubscriptionService({ config, logger }),
     auth: createUserTokenVerifier(config, logger),
+    rateLimit: {
+      byAccount: createRateLimiter({
+        limit: config.rateLimit.ticketPerAccount,
+        windowSeconds: config.rateLimit.windowSeconds,
+      }),
+      byIp: createRateLimiter({
+        limit: config.rateLimit.ticketPerIp,
+        windowSeconds: config.rateLimit.windowSeconds,
+      }),
+    },
+    abuse: createAbuseWatcher({
+      thresholdBytes: BigInt(config.quota.spikeGbPerDay) * BYTES_IN_GB,
+    }),
     lifecycle: { shuttingDown: false },
   };
 }

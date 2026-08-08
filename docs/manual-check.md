@@ -13,6 +13,7 @@ cp .env.example .env
 
 npm run keygen        # -> TICKET_PRIVATE_KEY_CURRENT в .env
 npm run gen:secret    # -> NODE_SHARED_SECRET в .env
+npm run gen:salt      # -> SLUG_SALT в .env (генерируется один раз, не меняется)
 
 docker compose up -d postgres
 npm run migrate
@@ -49,7 +50,10 @@ curl -s localhost:3000/.well-known/jwks.json
 ## 3. Тикет
 
 ```bash
-TOKEN=$(npm run --silent devtoken -- --sub 12345 --name "Иван Петров")
+# account_id — UUID, как claim sub у auth-сервиса. Без --sub генерируется
+# случайный (сам UUID печатается в stderr).
+ACCOUNT=018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b
+TOKEN=$(npm run --silent devtoken -- --sub $ACCOUNT --name "Иван Петров")
 
 curl -s -X POST localhost:3000/api/tunnel/ticket \
   -H "Authorization: Bearer $TOKEN" \
@@ -136,14 +140,29 @@ warning «использую протухший кэш подписки». Лю�
 ```bash
 curl -s -X POST localhost:3000/api/internal/usage \
   -H "Authorization: Bearer $SECRET" -H 'content-type: application/json' \
-  -d '{"nodeId":"eu-1","items":[{"accountId":"12345","period":"2026-08","bytesIn":"1000000000","bytesOut":"2000000000"}]}'
+  -d "{\"nodeId\":\"eu-1\",\"items\":[{\"accountId\":\"$ACCOUNT\",\"period\":\"2026-08\",\"bytesIn\":\"1000000000\",\"bytesOut\":\"2000000000\"}]}"
 ```
 
 Повторите тот же запрос дважды и посмотрите `/api/tunnel/status`: `quota.usedGb`
 должен быть 3, а не 6 — счётчик накопительный, повтор не удваивает.
 
-Чтобы увидеть отказ по квоте, пришлите расход больше квоты тарифа
-(`pro` — 50 ГБ) и запросите тикет: `403 quota_exceeded`.
+Квота тарифа — 10 ТБ в месяц, обычной игрой её не выбрать. Чтобы увидеть
+поведение на краю, пришлите заведомо большой расход:
+
+- больше 100 ГБ приростом за один батч — в логе появится запись
+  «подозрительно резкий расход трафика» с `suspicious: true`;
+- больше 8192 ГБ (80% квоты) и запросите тикет — в логе будет warning
+  «расход приблизился к квоте»;
+- больше 10240 ГБ — запрос тикета вернёт `403 quota_exceeded`.
+
+Ничего из этого ничего не блокирует автоматически, кроме последнего пункта.
+
+## 7a. Лимит запросов
+
+Дёрните `POST /api/tunnel/ticket` подряд больше `TICKET_RATE_LIMIT_PER_ACCOUNT`
+раз (по умолчанию 20 в минуту) — ответом будет `429 rate_limited` с заголовком
+`Retry-After`. Для быстрой проверки удобно временно поставить в `.env`
+`TICKET_RATE_LIMIT_PER_ACCOUNT=2`.
 
 ## 8. Что проверить напоследок
 

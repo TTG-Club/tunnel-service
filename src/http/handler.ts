@@ -1,5 +1,14 @@
 import { timingSafeEqual, createHash } from 'node:crypto';
-import { eventHandler, getRequestHeader, readRawBody, setResponseStatus, type EventHandler, type H3Event } from 'h3';
+import {
+  eventHandler,
+  getRequestHeader,
+  getRequestIP,
+  readRawBody,
+  setResponseHeader,
+  setResponseStatus,
+  type EventHandler,
+  type H3Event,
+} from 'h3';
 import { z } from 'zod';
 import { SlugAllocationError } from '../domain/slug/service.js';
 import type { Logger } from '../logger.js';
@@ -105,6 +114,28 @@ export function requireNodeSecret(services: AppServices, event: H3Event): void {
   if (!timingSafeEqual(a, b)) {
     throw ApiError.unauthorized('Неверный секрет ноды');
   }
+}
+
+/**
+ * Адрес клиента для лимита по IP. За Dokploy/Traefik он приходит в
+ * X-Forwarded-For, поэтому доверие к заголовку — вопрос конфигурации
+ * (`TRUST_PROXY`): при прямом доступе в интернет его можно подделать.
+ */
+export function clientIp(event: H3Event, trustProxy: boolean): string {
+  return getRequestIP(event, { xForwardedFor: trustProxy }) ?? 'unknown';
+}
+
+/** Проверяет лимит и, если он исчерпан, отдаёт 429 с Retry-After. */
+export function enforceRateLimit(
+  event: H3Event,
+  limiter: { hit(key: string): { allowed: boolean; retryAfterSeconds: number } },
+  key: string,
+): void {
+  const verdict = limiter.hit(key);
+  if (verdict.allowed) return;
+
+  setResponseHeader(event, 'retry-after', verdict.retryAfterSeconds);
+  throw ApiError.rateLimited(verdict.retryAfterSeconds);
 }
 
 export async function readJsonBody<T>(event: H3Event, schema: z.ZodType<T>): Promise<T> {

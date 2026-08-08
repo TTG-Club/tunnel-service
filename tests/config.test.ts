@@ -39,6 +39,20 @@ describe('конфигурация', () => {
     expect(() => loadConfig(makeEnv({ NODE_SHARED_SECRET: 'short' }))).toThrow(/NODE_SHARED_SECRET/);
   });
 
+  // Без соли суффикс мира вычисляется из одного worldId, и адреса чужих миров
+  // становятся подбираемыми. Поэтому переменная обязательная.
+  it('без SLUG_SALT сервис не стартует', () => {
+    const env = makeEnv();
+    delete env['SLUG_SALT'];
+
+    expect(() => loadConfig(env)).toThrow(ConfigError);
+    expect(() => loadConfig(env)).toThrow(/SLUG_SALT/);
+  });
+
+  it('короткая соль не принимается', () => {
+    expect(() => loadConfig(makeEnv({ SLUG_SALT: 'коротко' }))).toThrow(/SLUG_SALT/);
+  });
+
   it('умолчания соответствуют заданию', () => {
     const config = loadConfig(makeEnv());
 

@@ -15,6 +15,7 @@
     "migrate:status": "tsx src/cli/migrate.ts status",
     "keygen": "tsx src/cli/keygen.ts",
     "gen:secret": "tsx src/cli/gen-secret.ts",
+    "gen:salt": "tsx src/cli/gen-salt.ts",
     "devtoken": "tsx src/cli/devtoken.ts",
     "mock:subscriber": "node tools/subscriber-mock.mjs",
     "test": "vitest run",

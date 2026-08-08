@@ -8,6 +8,7 @@ export type ErrorCode =
   | 'forbidden'
   | 'not_found'
   | 'payload_too_large'
+  | 'rate_limited'
   | 'auth_unavailable'
   | 'subscription_inactive'
   | 'subscription_unavailable'
@@ -52,6 +53,15 @@ export class ApiError extends Error {
 
   static notFound(message = 'Не найдено'): ApiError {
     return new ApiError(404, 'not_found', message);
+  }
+
+  static rateLimited(retryAfterSeconds: number): ApiError {
+    return new ApiError(
+      429,
+      'rate_limited',
+      `Слишком много запросов тикета. Попробуйте через ${retryAfterSeconds} с.`,
+      { retryAfterSeconds },
+    );
   }
 
   /** Не смогли проверить токен: JWKS auth-сервиса недоступен. Это не вина клиента. */

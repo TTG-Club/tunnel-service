@@ -22,6 +22,7 @@ export function makeEnv(overrides: Record<string, string | undefined> = {}): Nod
     SUBSCRIBER_BASE_URL: 'https://subscriber.api.ttg.club',
     TICKET_PRIVATE_KEY_CURRENT: generateKeyMaterial(),
     NODE_SHARED_SECRET: 'x'.repeat(48),
+    SLUG_SALT: 'salt-for-tests-0123456789abcdef',
     ...overrides,
   };
 }

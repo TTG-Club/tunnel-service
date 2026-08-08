@@ -1,13 +1,26 @@
 import type { Router } from 'h3';
 import { z } from 'zod';
-import { BYTES_IN_GB, quotaLeftGb, resolveTier, type TierLimits } from '../../domain/limits.js';
+import {
+  BYTES_IN_GB,
+  quotaLeftGb,
+  resolveTier,
+  usedPercent,
+  type TierLimits,
+} from '../../domain/limits.js';
 import { selectNode } from '../../domain/nodes/select.js';
 import { issueTicket } from '../../domain/ticket/issue.js';
 import { currentPeriod } from '../../domain/usage/repository.js';
 import type { AppServices } from '../../services.js';
 import type { SubscriptionResult } from '../../upstream/subscriber.js';
 import { ApiError } from '../errors.js';
-import { apiHandler, readJsonBody, requestLogger, requireUser } from '../handler.js';
+import {
+  apiHandler,
+  clientIp,
+  enforceRateLimit,
+  readJsonBody,
+  requestLogger,
+  requireUser,
+} from '../handler.js';
 
 const ticketRequestSchema = z.object({
   worlds: z
@@ -65,7 +78,17 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
     '/api/tunnel/ticket',
     apiHandler(services, async (event) => {
       const logger = requestLogger(services, event);
+
+      // 0. Лимит по IP — до разбора токена: это самая дешёвая проверка, и она
+      //    закрывает поток запросов от одного клиента с чужими токенами.
+      enforceRateLimit(event, services.rateLimit.byIp, clientIp(event, config.http.trustProxy));
+
       const { user, accessToken } = await requireUser(services, event);
+
+      // Лимит по аккаунту — до похода в subscriber.api, иначе через нас можно
+      // нагрузить сервис подписок.
+      enforceRateLimit(event, services.rateLimit.byAccount, user.accountId);
+
       const body = await readJsonBody(event, ticketRequestSchema);
       const worlds = dedupeWorlds(body.worlds);
 
@@ -94,6 +117,20 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
           period,
           usedGb: Number(usage.total / BYTES_IN_GB),
           quotaGb: tier.limits.quotaGb,
+        });
+      }
+
+      // Квота в 10 ТБ обычной игрой недостижима, поэтому приближение к ней —
+      // повод посмотреть на аккаунт руками, а не молча ждать отказа.
+      const percent = usedPercent(tier.limits, usage.total);
+      if (percent >= config.quota.warnPercent) {
+        logger.warn('расход приблизился к квоте', {
+          accountId: user.accountId,
+          period,
+          usedGb: Number(usage.total / BYTES_IN_GB),
+          quotaGb: tier.limits.quotaGb,
+          usedPercent: percent,
+          suspicious: true,
         });
       }
 
