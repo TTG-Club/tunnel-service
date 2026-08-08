@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+coverage/
+
+.env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p8
+secrets/
+
+.DS_Store
+*.log
+.idea/
+.vscode/
+
+# локальные данные postgres из docker-compose
+.pgdata/
