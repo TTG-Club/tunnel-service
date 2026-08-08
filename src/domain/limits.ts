@@ -46,10 +46,16 @@ export function resolveTier(raw: string | null | undefined, defaultTier: string,
 
 export const BYTES_IN_GB = 1_000_000_000n;
 
-/** Сколько гигабайт квоты осталось. Никогда не отрицательное. */
+/**
+ * Сколько гигабайт квоты осталось.
+ *
+ * Округление вверх, и это принципиально: ноль должен означать ровно
+ * «квота исчерпана». С округлением вниз последние 999 МБ показывались бы как
+ * 0 ГБ, и выдача тикета отказывала бы человеку, у которого квота ещё есть.
+ */
 export function quotaLeftGb(limits: TierLimits, usedBytes: bigint): number {
   const quotaBytes = BigInt(limits.quotaGb) * BYTES_IN_GB;
   const left = quotaBytes - usedBytes;
   if (left <= 0n) return 0;
-  return Math.floor(Number(left) / Number(BYTES_IN_GB));
+  return Math.ceil(Number(left) / Number(BYTES_IN_GB));
 }

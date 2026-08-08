@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { resolveTier } from '../src/domain/limits.js';
+import { BYTES_IN_GB, TIERS, quotaLeftGb, resolveTier, type TierLimits } from '../src/domain/limits.js';
 import {
   SubscriberRejectedError,
   SubscriptionUnavailableError,
@@ -207,6 +207,17 @@ describe('тариф', () => {
     const tier = resolveTier('free', 'pro', capturingLogger());
     expect(tier.name).toBe('free');
     expect(tier.limits.quotaGb).toBe(5);
+  });
+
+  it('ноль остатка означает ровно «квота исчерпана»', () => {
+    const limits = TIERS['pro'] as TierLimits;
+    const quota = BigInt(limits.quotaGb) * BYTES_IN_GB;
+
+    expect(quotaLeftGb(limits, 0n)).toBe(50);
+    // Остались последние мегабайты — это ещё не исчерпанная квота.
+    expect(quotaLeftGb(limits, quota - 1n)).toBe(1);
+    expect(quotaLeftGb(limits, quota)).toBe(0);
+    expect(quotaLeftGb(limits, quota * 2n)).toBe(0);
   });
 
   it('незнакомый tier не ломает выдачу, но попадает в лог', () => {
