@@ -4,7 +4,7 @@ import { ApiError } from '../http/errors.js';
 import type { Logger } from '../logger.js';
 
 export interface AuthenticatedUser {
-  /** account_id: `sub` токена. Только цифры — в базе это bigint. */
+  /** account_id: claim `sub` токена. UUID — в базе это тип uuid. */
   readonly accountId: string;
   readonly displayName: string | null;
   readonly tokenExpiresAt: Date | null;
@@ -17,7 +17,12 @@ export interface UserTokenVerifier {
   verify(token: string): Promise<AuthenticatedUser>;
 }
 
-const ACCOUNT_ID_RE = /^[0-9]{1,19}$/;
+/**
+ * UUID любой версии. Проверяем формат до похода в базу: иначе `sub` вида
+ * `'; drop ...` дошёл бы до параметра типа uuid и обернулся 500-й вместо
+ * внятной 401.
+ */
+export const ACCOUNT_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** Ошибки jose, означающие «не смогли добраться до ключей», а не «токен плохой». */
 const JWKS_TRANSPORT_ERRORS = new Set([
@@ -36,10 +41,12 @@ function extractAccountId(payload: JWTPayload): string {
   const sub = payload.sub;
   if (typeof sub !== 'string' || !ACCOUNT_ID_RE.test(sub)) {
     throw ApiError.unauthorized(
-      'В токене нет числового идентификатора аккаунта (claim sub) — такой токен нам не подходит',
+      'В токене нет идентификатора аккаунта в формате UUID (claim sub) — такой токен нам не подходит',
     );
   }
-  return sub;
+  // Приводим к нижнему регистру: Postgres нормализует uuid сам, а нам нужен
+  // один и тот же ключ кэша подписки и лимитов для одного аккаунта.
+  return sub.toLowerCase();
 }
 
 function extractDisplayName(payload: JWTPayload, claims: readonly string[]): string | null {

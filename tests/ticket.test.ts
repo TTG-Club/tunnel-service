@@ -3,6 +3,9 @@ import { issueTicket, verifyTicket } from '../src/domain/ticket/issue.js';
 import { TicketKeyError, createTicketKeyring } from '../src/domain/ticket/keys.js';
 import { generateKeyMaterial, makeConfig } from './helpers.js';
 
+// account_id — UUID из claim sub токена auth-сервиса.
+const ACCOUNT_ID = '018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b';
+
 const TICKET_OPTIONS = {
   issuer: 'tunnel.ttg.club',
   audience: 'ttg-tunnel-node',
@@ -10,7 +13,7 @@ const TICKET_OPTIONS = {
 };
 
 const INPUT = {
-  accountId: '12345',
+  accountId: ACCOUNT_ID,
   slug: 'ivan',
   nodeId: 'eu-1',
   hosts: ['ivan', 'ivan-a7k2m9'],
@@ -28,7 +31,7 @@ describe('сборка тикета', () => {
     const issued = await issueTicket(keyring, TICKET_OPTIONS, INPUT);
     const payload = await verifyTicket(keyring, TICKET_OPTIONS, issued.token);
 
-    expect(payload.sub).toBe('12345');
+    expect(payload.sub).toBe(ACCOUNT_ID);
     expect(payload.slug).toBe('ivan');
     expect(payload.node).toBe('eu-1');
     expect(payload.hosts).toEqual(['ivan', 'ivan-a7k2m9']);

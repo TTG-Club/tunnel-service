@@ -17,7 +17,7 @@ describe('секреты в логах', () => {
       ticket: JWT,
       privateKey: '-----BEGIN PRIVATE KEY-----\nMC4CAQ\n-----END PRIVATE KEY-----',
       cookie: 'session=1',
-      accountId: '12345',
+      accountId: '018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b',
     });
 
     const line = logger.lines[0] as string;
@@ -28,7 +28,7 @@ describe('секреты в логах', () => {
     expect(line).not.toContain('session=1');
     expect(line).not.toContain('MC4CAQ');
     // Неопасные поля остаются на месте, иначе логи бесполезны.
-    expect(line).toContain('12345');
+    expect(line).toContain('018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b');
   });
 
   it('токен вырезается, даже если оказался в неожиданном поле', () => {

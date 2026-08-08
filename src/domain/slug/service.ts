@@ -1,5 +1,5 @@
 import type { Logger } from '../../logger.js';
-import { randomToken, stableToken } from '../../util/random.js';
+import { randomToken, saltedToken } from '../../util/random.js';
 import {
   SLUG_MAX_LENGTH,
   SLUG_MAX_LENGTH_TOTAL,
@@ -31,8 +31,13 @@ export interface AccountCandidate {
   readonly reason: CandidateReason;
 }
 
-function fallbackBase(accountId: string): string {
-  return `u${accountId}`;
+/**
+ * Запасная основа, когда из имени ничего не вышло. account_id — UUID, целиком
+ * он в слаг не влезет и светить его в адресе незачем, поэтому берём короткий
+ * производный токен. Всё равно дополняется случайным суффиксом.
+ */
+function fallbackBase(accountId: string, salt: string): string {
+  return `u${saltedToken(salt, `account:${accountId}`, 5)}`;
 }
 
 /**
@@ -46,14 +51,15 @@ export function buildAccountCandidate(
   displayName: string | null,
   accountId: string,
   stopList: StopList,
+  salt: string,
 ): AccountCandidate {
   const normalized = normalizeSlugCandidate(displayName ?? '');
 
   if (normalized === '') {
-    return { base: fallbackBase(accountId), forceSuffix: true, reason: 'empty' };
+    return { base: fallbackBase(accountId, salt), forceSuffix: true, reason: 'empty' };
   }
   if (stopList.contains(normalized)) {
-    return { base: fallbackBase(accountId), forceSuffix: true, reason: 'blocked' };
+    return { base: fallbackBase(accountId, salt), forceSuffix: true, reason: 'blocked' };
   }
   if (normalized.length < SLUG_MIN_LENGTH) {
     return { base: normalized, forceSuffix: true, reason: 'too-short' };
@@ -75,11 +81,13 @@ export interface SlugServiceDeps {
   readonly repository: SlugRepository;
   readonly stopList: StopList;
   readonly logger: Logger;
+  /** SLUG_SALT: секрет, из которого выводятся суффиксы миров. */
+  readonly salt: string;
   readonly maxAttempts?: number;
 }
 
 export function createSlugService(deps: SlugServiceDeps): SlugService {
-  const { repository, stopList, logger } = deps;
+  const { repository, stopList, logger, salt } = deps;
   const maxAttempts = deps.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
 
   return {
@@ -87,7 +95,7 @@ export function createSlugService(deps: SlugServiceDeps): SlugService {
       const existing = await repository.findAccountSlug(accountId);
       if (existing) return existing;
 
-      const candidate = buildAccountCandidate(displayName, accountId, stopList);
+      const candidate = buildAccountCandidate(displayName, accountId, stopList, salt);
 
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
         const slug =
@@ -130,13 +138,19 @@ export function createSlugService(deps: SlugServiceDeps): SlugService {
     },
 
     async ensureWorldSlug(accountId, parentSlug, worldId) {
+      // Уже выданный слаг берётся из базы как есть: соль здесь не участвует,
+      // поэтому её смена не ломает существующие адреса.
       const existing = await repository.findWorldSlug(accountId, worldId);
       if (existing) return existing;
 
       for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-        // Первая попытка — детерминированный id: пересоздание мира с тем же
-        // worldId даёт тот же адрес. Дальше — случайные суффиксы.
-        const suffix = attempt === 0 ? stableToken(worldId, SUFFIX_LENGTH) : randomToken(SUFFIX_LENGTH);
+        // Первая попытка — детерминированный суффикс от worldId на секретной
+        // соли: пересоздание мира с тем же worldId даёт тот же адрес, но
+        // подобрать адрес чужого мира по своему нельзя. Дальше — случайные.
+        const suffix =
+          attempt === 0
+            ? saltedToken(salt, `world:${worldId}`, SUFFIX_LENGTH)
+            : randomToken(SUFFIX_LENGTH);
         const slug = withSuffix(parentSlug, suffix, SLUG_MAX_LENGTH_TOTAL);
 
         if (!isValidSlugShape(slug) || stopList.contains(slug)) continue;

@@ -1,6 +1,8 @@
 import type { Router } from 'h3';
 import { z } from 'zod';
+import { BYTES_IN_GB } from '../../domain/limits.js';
 import type { AppServices } from '../../services.js';
+import { ACCOUNT_ID_RE } from '../../upstream/auth.js';
 import { apiHandler, readJsonBody, requestLogger, requireNodeSecret } from '../handler.js';
 
 const nodeId = z
@@ -14,9 +16,11 @@ const byteCounter = z
   .union([z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), z.string().regex(/^\d{1,19}$/)])
   .transform((value) => BigInt(value));
 
+/** account_id — UUID из claim `sub` токена пользователя. */
 const accountId = z
-  .union([z.string().regex(/^\d{1,19}$/), z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)])
-  .transform((value) => String(value));
+  .string()
+  .regex(ACCOUNT_ID_RE, 'ожидается идентификатор аккаунта в формате UUID')
+  .transform((value) => value.toLowerCase());
 
 const heartbeatSchema = z.object({
   nodeId,
@@ -105,6 +109,23 @@ export function registerInternalRoutes(router: Router, services: AppServices): v
         });
       }
 
+      // Резкий прирост — сигнал для ручного разбора. Ничего не блокируем:
+      // ложное срабатывание не должно выключать человеку игру.
+      for (const delta of result.deltas) {
+        const verdict = services.abuse.record(delta.accountId, delta.deltaBytes);
+        if (!verdict.spike) continue;
+
+        logger.warn('подозрительно резкий расход трафика', {
+          accountId: delta.accountId,
+          period: delta.period,
+          node: body.nodeId,
+          windowGb: Number(verdict.windowBytes / BYTES_IN_GB),
+          thresholdGbPerDay: services.config.quota.spikeGbPerDay,
+          totalGb: Number(delta.totalBytes / BYTES_IN_GB),
+          suspicious: true,
+        });
+      }
+
       logger.debug('приняты метрики трафика', {
         node: body.nodeId,
         items: body.items.length,
@@ -112,7 +133,14 @@ export function registerInternalRoutes(router: Router, services: AppServices): v
         accounts: result.accounts,
       });
 
-      return { ok: true, ...result };
+      // Поля перечислены явно: в deltas лежат bigint, и JSON.stringify на них
+      // падает.
+      return {
+        ok: true,
+        applied: result.applied,
+        accounts: result.accounts,
+        regressions: result.regressions,
+      };
     }),
   );
 }

@@ -1,6 +1,7 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
 import { SignJWT } from 'jose';
+import { ACCOUNT_ID_RE } from '../upstream/auth.js';
 
 /**
  * Тестовый токен пользователя для локальной разработки.
@@ -13,15 +14,17 @@ import { SignJWT } from 'jose';
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
-      sub: { type: 'string', default: '12345' },
+      sub: { type: 'string' },
       name: { type: 'string', default: 'Иван Петров' },
       ttl: { type: 'string', default: '3600' },
     },
   });
 
-  const sub = values.sub as string;
-  if (!/^\d{1,19}$/.test(sub)) {
-    process.stderr.write('--sub должен быть числовым идентификатором аккаунта\n');
+  // Без --sub каждый запуск даёт новый аккаунт: удобно проверять выдачу слага
+  // «с нуля», не чистя базу.
+  const sub = (values.sub ?? randomUUID()).toLowerCase();
+  if (!ACCOUNT_ID_RE.test(sub)) {
+    process.stderr.write('--sub должен быть UUID, как claim sub у auth-сервиса\n');
     process.exit(1);
   }
 
@@ -35,6 +38,9 @@ async function main(): Promise<void> {
     .setExpirationTime(now + (Number.isFinite(ttl) ? ttl : 3600))
     .sign(randomBytes(32));
 
+  // Токен — в stdout, чтобы его можно было подставить в $(...); всё
+  // остальное — в stderr.
+  process.stderr.write(`sub=${sub}\n`);
   process.stdout.write(`${token}\n`);
 }
 

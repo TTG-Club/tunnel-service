@@ -6,7 +6,8 @@
 -- ---------------------------------------------------------------------------
 create table slugs (
   slug        text primary key,
-  account_id  bigint not null,
+  -- account_id — это claim sub из токена auth-сервиса, там UUID.
+  account_id  uuid not null,
   kind        text not null,
   parent_slug text references slugs (slug),
   world_id    text,
@@ -54,6 +55,12 @@ create table nodes (
   tunnels      integer not null default 0,
   streams      integer not null default 0,
 
+  -- Задел под персональный токен ноды вместо общего секрета: хранится хэш,
+  -- не сам токен. Пока не используется — авторизация нод идёт по
+  -- NODE_SHARED_SECRET. Колонка заведена сразу, чтобы не накатывать её потом
+  -- на живых нодах.
+  token_hash   text,
+
   created_at   timestamptz not null default now(),
 
   constraint nodes_status_check check (status in ('active', 'draining', 'down')),
@@ -61,6 +68,8 @@ create table nodes (
 );
 
 create index nodes_alive_idx on nodes (status, last_seen_at desc);
+
+create unique index nodes_token_hash_key on nodes (token_hash) where token_hash is not null;
 
 -- ---------------------------------------------------------------------------
 -- Расход трафика.
@@ -72,7 +81,7 @@ create index nodes_alive_idx on nodes (status, last_seen_at desc);
 -- ---------------------------------------------------------------------------
 create table node_usage (
   node_id    text not null,
-  account_id bigint not null,
+  account_id uuid not null,
   period     text not null,
   bytes_in   bigint not null default 0,
   bytes_out  bigint not null default 0,
@@ -86,7 +95,7 @@ create table node_usage (
 create index node_usage_account_period_idx on node_usage (account_id, period);
 
 create table usage (
-  account_id bigint not null,
+  account_id uuid not null,
   period     text not null,
   bytes_in   bigint not null default 0,
   bytes_out  bigint not null default 0,
