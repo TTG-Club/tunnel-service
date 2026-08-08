@@ -76,18 +76,18 @@ curl http://localhost:3000/.well-known/jwks.json
 npm run devtoken -- --sub 12345 --name "Иван Петров"
 ```
 
-**subscriber.** Поднимите заглушку из compose-профиля `mocks` и укажите её:
+**subscriber.** Поднимите заглушку и укажите её в `.env`:
 
 ```bash
-docker compose --profile mocks up -d subscriber-mock
+npm run mock:subscriber          # http://localhost:4010
 # в .env: SUBSCRIBER_BASE_URL=http://localhost:4010
 ```
 
-Заглушка отвечает `{ "active": true, "registered": true, "expiresAt": null }` и
-умеет ломаться по требованию (`/__mock/mode/down`), чтобы проверить поведение
-кэша подписки.
+Заглушка отвечает `{ "active": true, "registered": true, "expiresAt": ... }` —
+без поля `tier`, как настоящий сервис сегодня, — и умеет ломаться по команде
+(`POST /__mock/mode/down`), чтобы проверить поведение кэша подписки.
 
-Полный сценарий: `docs/manual-check.md`.
+Полный сценарий по шагам: [docs/manual-check.md](docs/manual-check.md).
 
 ## Команды
 
@@ -103,6 +103,7 @@ docker compose --profile mocks up -d subscriber-mock
 | `npm run keygen` | сгенерировать ключ подписи тикетов (в stdout, не в файл) |
 | `npm run gen:secret` | сгенерировать `NODE_SHARED_SECRET` |
 | `npm run devtoken` | собрать тестовый пользовательский JWT для dev-режима |
+| `npm run mock:subscriber` | заглушка `subscriber.api` на порту 4010 |
 
 В образе Docker те же миграции применяются командой
 `node dist/cli/migrate.js up` — отдельным шагом деплоя, не при старте
@@ -141,6 +142,7 @@ docker compose --profile mocks up -d subscriber-mock
 | `SUBSCRIPTION_DEFAULT_TIER` | нет | `pro` | тариф, пока `subscriber.api` не отдаёт `tier` |
 | `NODE_SHARED_SECRET` | **да** | — | общий секрет для `/api/internal/*`, ≥32 символов |
 | `NODE_HEARTBEAT_TIMEOUT_SECONDS` | нет | `90` | после какого молчания нода считается мёртвой |
+| `SLUG_STOPLIST_PATH` | нет | `data/stoplist.txt` | файл стоп-листа по мату |
 
 \* формально необязательная, но при `NODE_ENV=production` её отсутствие —
 ошибка старта.
