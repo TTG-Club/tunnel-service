@@ -1,0 +1,38 @@
+# Локальная разработка. В бою всё разворачивает Dokploy, этот файл туда
+# не едет: здесь нужен только Postgres под рукой.
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tunnel
+      POSTGRES_PASSWORD: tunnel
+      POSTGRES_DB: tunnel
+    ports:
+      - '5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U tunnel -d tunnel']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Сервис в контейнере — по требованию: docker compose --profile app up
+  app:
+    profiles: ['app']
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgres://tunnel:tunnel@postgres:5432/tunnel
+      HTTP_PORT: '3000'
+    ports:
+      - '3000:3000'
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
