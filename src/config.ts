@@ -18,22 +18,27 @@ export interface AppConfig {
     readonly audience: string;
     readonly privateKeyCurrent: string;
     readonly privateKeyPrevious: string | null;
+    /** Значение claim `tier` в тикете. Тарифов у subscriber нет, это константа. */
+    readonly tier: string;
   };
   readonly auth: {
-    /** null — dev-режим: подпись токена пользователя не проверяется. */
+    /** JWKS auth-сервиса. Задан — проверяем по ключу, он приоритетнее секрета. */
     readonly jwksUrl: string | null;
-    readonly issuer: string | null;
-    readonly audience: string | null;
+    /** Общий с остальными сервисами JWT_SECRET: HMAC по сырым байтам UTF-8. */
+    readonly secret: string | null;
     readonly jwksCacheSeconds: number;
-    readonly nameClaims: readonly string[];
+    /** Допуск на расхождение часов при проверке `exp`, секунды. */
+    readonly clockToleranceSeconds: number;
   };
   readonly subscriber: {
     readonly baseUrl: string;
+    /** Путь статуса с плейсхолдером `{username}`. */
     readonly statusPath: string;
+    /** Значение заголовка `X-Service-Token` для internal-ручки. */
+    readonly serviceToken: string;
     readonly timeoutMs: number;
     readonly cacheTtlSeconds: number;
     readonly staleMaxSeconds: number;
-    readonly defaultTier: string;
   };
   readonly nodes: {
     readonly sharedSecret: string;
@@ -102,22 +107,33 @@ const schema = z.object({
   TICKET_AUDIENCE: z.string().min(1).default('ttg-tunnel-node'),
   TICKET_PRIVATE_KEY_CURRENT: z.string().min(1, 'приватный ключ подписи тикетов обязателен (npm run keygen)'),
   TICKET_PRIVATE_KEY_PREVIOUS: z.string().min(1).optional(),
+  TICKET_TIER: z.string().min(1).default('pro'),
 
   AUTH_JWKS_URL: z.url().optional(),
-  AUTH_JWT_ISSUER: z.string().min(1).optional(),
-  AUTH_JWT_AUDIENCE: z.string().min(1).optional(),
-  AUTH_JWKS_CACHE_SECONDS: envInt(3600, 60, 86_400),
-  AUTH_NAME_CLAIMS: z
+  // Тот же JWT_SECRET, что у остальных сервисов. auth-service требует от него
+  // 32 байта (HS256), поэтому и мы: короче — значит, это не он.
+  AUTH_JWT_SECRET: z
     .string()
-    .default('name,username,preferred_username,nickname,login')
-    .transform((value) => value.split(',').map((c) => c.trim()).filter(Boolean)),
+    .refine(
+      (value) => Buffer.byteLength(value, 'utf8') >= 32,
+      'должен быть не короче 32 байт — столько требует HS256 и сам auth-сервис',
+    )
+    .optional(),
+  AUTH_JWKS_CACHE_SECONDS: envInt(3600, 60, 86_400),
+  AUTH_CLOCK_TOLERANCE_SECONDS: envInt(30, 0, 300),
 
   SUBSCRIBER_BASE_URL: z.url(),
-  SUBSCRIBER_STATUS_PATH: z.string().startsWith('/').default('/api/subscriptions/status'),
+  SUBSCRIBER_STATUS_PATH: z
+    .string()
+    .startsWith('/')
+    .includes('{username}', { message: 'должен содержать плейсхолдер {username}' })
+    .default('/api/internal/subscriptions/{username}/status'),
+  INTERNAL_SERVICE_SECRET: z
+    .string()
+    .min(1, 'обязателен: без него internal-ручка подписок отвечает 401'),
   SUBSCRIBER_TIMEOUT_MS: envInt(3000, 100, 30_000),
   SUBSCRIPTION_CACHE_TTL_SECONDS: envInt(180, 30, 900),
   SUBSCRIPTION_STALE_MAX_SECONDS: envInt(86_400, 60, 30 * 86_400),
-  SUBSCRIPTION_DEFAULT_TIER: z.string().min(1).default('pro'),
 
   NODE_SHARED_SECRET: z.string().min(32, 'должен быть не короче 32 символов (npm run gen:secret)'),
   NODE_HEARTBEAT_TIMEOUT_SECONDS: envInt(90, 10, 3600),
@@ -138,7 +154,7 @@ const schema = z.object({
 /**
  * Пустая строка в окружении — это «не задано», а не «задано пустым».
  * Dokploy и docker-compose легко подсовывают пустые значения, и без этого
- * `AUTH_JWKS_URL=` роняло бы старт вместо включения dev-режима.
+ * `AUTH_JWKS_URL=` роняло бы старт вместо переключения на общий секрет.
  */
 function dropEmpty(env: NodeJS.ProcessEnv): Record<string, string> {
   const result: Record<string, string> = {};
@@ -164,12 +180,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const raw = parsed.data;
   const problems: string[] = [];
 
-  // Главная защита от «однажды уедет в прод и будет выдавать туннели кому
-  // угодно»: без JWKS auth-сервиса production просто не стартует.
-  if (raw.NODE_ENV === 'production' && !raw.AUTH_JWKS_URL) {
+  // Режима «декодируем токен без проверки подписи» больше нет ни в каком виде,
+  // ни в каком NODE_ENV. Проверять подпись нечем — сервис не стартует.
+  if (!raw.AUTH_JWKS_URL && !raw.AUTH_JWT_SECRET) {
     problems.push(
-      'AUTH_JWKS_URL: при NODE_ENV=production обязателен. Без него подпись токена ' +
-        'пользователя не проверяется, и тикет сможет получить кто угодно.',
+      'AUTH_JWT_SECRET: обязателен. Это общий JWT_SECRET auth-сервиса, которым ' +
+        'проверяется подпись токена пользователя. Альтернатива — AUTH_JWKS_URL, ' +
+        'когда auth переедет на асимметричную подпись. Без одного из двух проверить ' +
+        'токен нечем, и тикет получил бы кто угодно.',
     );
   }
 
@@ -202,21 +220,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       audience: raw.TICKET_AUDIENCE,
       privateKeyCurrent: raw.TICKET_PRIVATE_KEY_CURRENT,
       privateKeyPrevious: raw.TICKET_PRIVATE_KEY_PREVIOUS ?? null,
+      tier: raw.TICKET_TIER,
     },
     auth: {
       jwksUrl: raw.AUTH_JWKS_URL ?? null,
-      issuer: raw.AUTH_JWT_ISSUER ?? null,
-      audience: raw.AUTH_JWT_AUDIENCE ?? null,
+      secret: raw.AUTH_JWT_SECRET ?? null,
       jwksCacheSeconds: raw.AUTH_JWKS_CACHE_SECONDS,
-      nameClaims: raw.AUTH_NAME_CLAIMS,
+      clockToleranceSeconds: raw.AUTH_CLOCK_TOLERANCE_SECONDS,
     },
     subscriber: {
       baseUrl: raw.SUBSCRIBER_BASE_URL.replace(/\/+$/, ''),
       statusPath: raw.SUBSCRIBER_STATUS_PATH,
+      serviceToken: raw.INTERNAL_SERVICE_SECRET,
       timeoutMs: raw.SUBSCRIBER_TIMEOUT_MS,
       cacheTtlSeconds: raw.SUBSCRIPTION_CACHE_TTL_SECONDS,
       staleMaxSeconds: raw.SUBSCRIPTION_STALE_MAX_SECONDS,
-      defaultTier: raw.SUBSCRIPTION_DEFAULT_TIER,
     },
     nodes: {
       sharedSecret: raw.NODE_SHARED_SECRET,
@@ -233,9 +251,4 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       spikeGbPerDay: raw.QUOTA_SPIKE_GB_PER_DAY,
     },
   };
-}
-
-/** Проверка JWT пользователя выключена (нет AUTH_JWKS_URL). */
-export function isAuthDevMode(config: AppConfig): boolean {
-  return config.auth.jwksUrl === null;
 }

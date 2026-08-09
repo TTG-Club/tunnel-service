@@ -54,9 +54,9 @@ function readVersion(): string {
  * подписи, стоп-лист), падает здесь — до того, как сервис начнёт слушать порт.
  */
 export async function createServices(config: AppConfig, logger: Logger): Promise<AppServices> {
-  if (!isKnownTier(config.subscriber.defaultTier)) {
+  if (!isKnownTier(config.ticket.tier)) {
     throw new Error(
-      `SUBSCRIPTION_DEFAULT_TIER=${config.subscriber.defaultTier}: неизвестный тариф. ` +
+      `TICKET_TIER=${config.ticket.tier}: неизвестный тариф. ` +
         `Доступны: ${Object.keys(TIERS).join(', ')}`,
     );
   }

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { ConfigError, isAuthDevMode, loadConfig } from '../src/config.js';
+import { ConfigError, loadConfig } from '../src/config.js';
 import { makeEnv } from './helpers.js';
+
+const JWKS_URL = 'https://auth.api.ttg.club/.well-known/jwks.json';
 
 describe('конфигурация', () => {
   it('без обязательной переменной падает с понятной ошибкой', () => {
@@ -14,25 +16,54 @@ describe('конфигурация', () => {
   it('пустая строка — это «не задано», а не пустое значение', () => {
     const config = loadConfig(makeEnv({ AUTH_JWKS_URL: '' }));
     expect(config.auth.jwksUrl).toBeNull();
-    expect(isAuthDevMode(config)).toBe(true);
+    expect(config.auth.secret).not.toBeNull();
   });
 
-  // Главная страховка: без JWKS auth-сервиса подпись пользовательского токена
-  // не проверяется, поэтому в production такой конфиг просто не поднимется.
-  it('в production без AUTH_JWKS_URL сервис не стартует', () => {
-    expect(() => loadConfig(makeEnv({ NODE_ENV: 'production' }))).toThrow(/AUTH_JWKS_URL/);
+  // Главная страховка: проверять подпись пользовательского токена нечем —
+  // сервис не поднимается. Ни в каком NODE_ENV, режима «без проверки» нет.
+  it('без AUTH_JWT_SECRET и без AUTH_JWKS_URL сервис не стартует', () => {
+    const env = makeEnv();
+    delete env['AUTH_JWT_SECRET'];
+
+    expect(() => loadConfig(env)).toThrow(ConfigError);
+    expect(() => loadConfig(env)).toThrow(/AUTH_JWT_SECRET/);
   });
 
-  it('в production с AUTH_JWKS_URL стартует', () => {
-    const config = loadConfig(
-      makeEnv({
-        NODE_ENV: 'production',
-        AUTH_JWKS_URL: 'https://auth.api.ttg.club/.well-known/jwks.json',
-      }),
-    );
+  it('короткий AUTH_JWT_SECRET не принимается', () => {
+    expect(() => loadConfig(makeEnv({ AUTH_JWT_SECRET: 'коротко' }))).toThrow(/AUTH_JWT_SECRET/);
+  });
 
-    expect(isAuthDevMode(config)).toBe(false);
-    expect(config.auth.jwksUrl).toBe('https://auth.api.ttg.club/.well-known/jwks.json');
+  // Ветка JWKS живая: когда auth переедет на асимметричную подпись, это будет
+  // настройкой, а не правкой кода.
+  it('один AUTH_JWKS_URL без секрета — валидная конфигурация', () => {
+    const env = makeEnv({ AUTH_JWKS_URL: JWKS_URL });
+    delete env['AUTH_JWT_SECRET'];
+
+    const config = loadConfig(env);
+
+    expect(config.auth.jwksUrl).toBe(JWKS_URL);
+    expect(config.auth.secret).toBeNull();
+  });
+
+  it('заданы обе переменные — конфигурация валидна, приоритет разбирается в проверяльщике', () => {
+    const config = loadConfig(makeEnv({ AUTH_JWKS_URL: JWKS_URL }));
+
+    expect(config.auth.jwksUrl).toBe(JWKS_URL);
+    expect(config.auth.secret).not.toBeNull();
+  });
+
+  it('без INTERNAL_SERVICE_SECRET сервис не стартует', () => {
+    const env = makeEnv();
+    delete env['INTERNAL_SERVICE_SECRET'];
+
+    expect(() => loadConfig(env)).toThrow(/INTERNAL_SERVICE_SECRET/);
+  });
+
+  // Без плейсхолдера URL собрался бы без username и ушёл бы не туда.
+  it('путь статуса без {username} не принимается', () => {
+    expect(() =>
+      loadConfig(makeEnv({ SUBSCRIBER_STATUS_PATH: '/api/internal/subscriptions/status' })),
+    ).toThrow(/SUBSCRIBER_STATUS_PATH/);
   });
 
   it('короткий секрет нод не принимается', () => {
@@ -58,7 +89,9 @@ describe('конфигурация', () => {
 
     expect(config.ticket.alg).toBe('EdDSA');
     expect(config.ticket.ttlSeconds).toBe(900);
+    expect(config.ticket.tier).toBe('pro');
     expect(config.subscriber.cacheTtlSeconds).toBe(180);
-    expect(config.subscriber.statusPath).toBe('/api/subscriptions/status');
+    expect(config.subscriber.statusPath).toBe('/api/internal/subscriptions/{username}/status');
+    expect(config.auth.clockToleranceSeconds).toBe(30);
   });
 });

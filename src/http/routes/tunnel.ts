@@ -3,7 +3,7 @@ import { z } from 'zod';
 import {
   BYTES_IN_GB,
   quotaLeftGb,
-  resolveTier,
+  ticketTier,
   usedPercent,
   type TierLimits,
 } from '../../domain/limits.js';
@@ -54,8 +54,12 @@ function limitsView(limits: TierLimits, leftGb: number): Record<string, number> 
 function subscriptionView(result: SubscriptionResult): Record<string, unknown> {
   return {
     active: result.status.active,
+    // Справочные поля. `registered` — «когда-либо имел подписку», доступ по нему
+    // не выдаётся; `type` — способ появления подписки (GIFT/BUY), не тариф.
     registered: result.status.registered,
     expiresAt: result.status.expiresAt,
+    startsAt: result.status.startsAt,
+    type: result.status.type,
     // Полезно для диагностики: fresh / cache / stale.
     source: result.source,
   };
@@ -83,7 +87,7 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
       //    закрывает поток запросов от одного клиента с чужими токенами.
       enforceRateLimit(event, services.rateLimit.byIp, clientIp(event, config.http.trustProxy));
 
-      const { user, accessToken } = await requireUser(services, event);
+      const user = await requireUser(services, event);
 
       // Лимит по аккаунту — до похода в subscriber.api, иначе через нас можно
       // нагрузить сервис подписок.
@@ -94,7 +98,9 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
 
       // 1. Подписка. Всё остальное делается только после неё: ни слаг, ни
       //    тикет не должны появляться у аккаунта без активной подписки.
-      const subscription = await services.subscription.get(user.accountId, accessToken);
+      //    Гейт строго по `active`: `registered` означает «когда-либо имел
+      //    подписку» и у отозванного пользователя остаётся true.
+      const subscription = await services.subscription.get(user);
       if (!subscription.status.active) {
         throw ApiError.subscriptionInactive({
           registered: subscription.status.registered,
@@ -102,8 +108,9 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
         });
       }
 
-      // 2. Тариф и лимиты.
-      const tier = resolveTier(subscription.status.tier, config.subscriber.defaultTier, logger);
+      // 2. Тариф и лимиты. Тариф один и берётся из конфига — subscriber о
+      //    тарифах ничего не знает.
+      const tier = ticketTier(config.ticket.tier);
       if (worlds.length > tier.limits.maxWorlds) {
         throw ApiError.worldsLimitExceeded(worlds.length, tier.limits.maxWorlds);
       }
@@ -144,7 +151,7 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
       }
 
       // 5. Слаги: аккаунта — навсегда, миров — по стабильному id мира.
-      const accountSlug = await services.slugs.ensureAccountSlug(user.accountId, user.displayName);
+      const accountSlug = await services.slugs.ensureAccountSlug(user.accountId, user.username);
       const worldSlugs = await Promise.all(
         worlds.map(async (world) => ({
           world,
@@ -183,6 +190,8 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
         tier: tier.name,
         jti: ticket.jti,
         subscriptionSource: subscription.source,
+        // Не влияет на выдачу, но по нему видно, откуда у человека подписка.
+        subscriptionType: subscription.status.type,
       });
 
       return {
@@ -219,11 +228,10 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
   router.get(
     '/api/tunnel/status',
     apiHandler(services, async (event) => {
-      const logger = requestLogger(services, event);
-      const { user, accessToken } = await requireUser(services, event);
+      const user = await requireUser(services, event);
 
-      const subscription = await services.subscription.get(user.accountId, accessToken);
-      const tier = resolveTier(subscription.status.tier, config.subscriber.defaultTier, logger);
+      const subscription = await services.subscription.get(user);
+      const tier = ticketTier(config.ticket.tier);
 
       const period = currentPeriod();
       const usage = await services.usage.getAccountUsage(user.accountId, period);

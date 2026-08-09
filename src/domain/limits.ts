@@ -1,5 +1,3 @@
-import type { Logger } from '../logger.js';
-
 export interface TierLimits {
   readonly maxStreams: number;
   readonly maxWorlds: number;
@@ -10,10 +8,15 @@ export interface TierLimits {
 /**
  * Тарифы.
  *
- * Сейчас тариф ровно один: без активной подписки сервисом воспользоваться
- * нельзя, урезанного бесплатного режима нет. Таблица оставлена таблицей, а не
- * схлопнута в константу, чтобы добавление второго тарифа было строчкой здесь:
- * поле `tier` в тикете и чтение `tier` из subscriber.api уже работают.
+ * Тариф ровно один, и это не временное упрощение: у subscriber тарифов нет ни
+ * как поля, ни как понятия. `GIFT`/`BUY` в его ответе — способ появления
+ * подписки, а уровни промо-кодов (RewardTier) при погашении растворяются и в
+ * подписку не переносятся. Правило простое: есть подписка — есть туннель с
+ * фиксированными лимитами.
+ *
+ * Таблица оставлена таблицей, а не схлопнута в константу, чтобы появление
+ * тарифов стало строчкой здесь: поле `tier` в тикете уже есть, брать его будет
+ * откуда.
  */
 export const TIERS: Readonly<Record<string, TierLimits>> = {
   pro: { maxStreams: 1000, maxWorlds: 5, quotaGb: 10_240 },
@@ -29,26 +32,16 @@ export function isKnownTier(name: string): boolean {
 }
 
 /**
- * `tier` в ответе subscriber.api пока нет — читаем с фолбэком на значение по
- * умолчанию. Незнакомый тариф тоже сводим к дефолтному, но с warning: лучше
- * пустить играть по базовым лимитам, чем отказать из-за нового названия.
+ * Тариф тикета — константа из конфига (`TICKET_TIER`). Сводить к умолчанию
+ * нечего: сообщать нам тариф некому.
+ *
+ * Имя проверяется при старте (createServices), поэтому на запросе исключения
+ * быть не может.
  */
-export function resolveTier(raw: string | null | undefined, defaultTier: string, logger: Logger): ResolvedTier {
-  const fallbackLimits = TIERS[defaultTier];
-  if (!fallbackLimits) {
-    throw new Error(`SUBSCRIPTION_DEFAULT_TIER=${defaultTier}: такого тарифа нет в TIERS`);
-  }
-
-  if (!raw) return { name: defaultTier, limits: fallbackLimits };
-
-  const known = TIERS[raw];
-  if (known) return { name: raw, limits: known };
-
-  logger.warn('неизвестный тариф от subscriber.api, применяю тариф по умолчанию', {
-    tier: raw,
-    defaultTier,
-  });
-  return { name: defaultTier, limits: fallbackLimits };
+export function ticketTier(name: string): ResolvedTier {
+  const limits = TIERS[name];
+  if (!limits) throw new Error(`TICKET_TIER=${name}: такого тарифа нет в TIERS`);
+  return { name, limits };
 }
 
 export const BYTES_IN_GB = 1_000_000_000n;

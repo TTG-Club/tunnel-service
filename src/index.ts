@@ -65,17 +65,6 @@ function installShutdown(server: Server, services: AppServices, inFlight: () => 
   process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
-function warnIfInsecure(config: AppConfig, services: AppServices): void {
-  if (services.auth.mode !== 'insecure-dev') return;
-
-  services.logger.warn(
-    'AUTH_JWKS_URL не задан: подпись токенов пользователей НЕ проверяется. ' +
-      'Режим только для разработки — задайте AUTH_JWKS_URL, когда у auth-сервиса ' +
-      'появится JWKS-эндпоинт.',
-    { env: config.env },
-  );
-}
-
 async function main(): Promise<void> {
   loadDotEnv();
 
@@ -100,7 +89,6 @@ async function main(): Promise<void> {
   });
 
   const services = await createServices(config, logger);
-  warnIfInsecure(config, services);
 
   const server = createServer(toNodeListener(createHttpApp(services)));
   server.keepAliveTimeout = 65_000;

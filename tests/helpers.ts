@@ -14,12 +14,17 @@ export function generateKeyMaterial(alg: TicketAlg = 'EdDSA'): string {
   );
 }
 
+/** Тот же JWT_SECRET, что у auth-сервиса: сырая строка, минимум 32 байта. */
+export const AUTH_SECRET = 'shared-jwt-secret-for-tests-0123456789';
+
 export function makeEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
     NODE_ENV: 'test',
     DATABASE_URL: 'postgres://tunnel:tunnel@localhost:5432/tunnel',
     PUBLIC_DOMAIN: 'play.ttg.club',
     SUBSCRIBER_BASE_URL: 'https://subscriber.api.ttg.club',
+    INTERNAL_SERVICE_SECRET: 'internal-service-secret-for-tests',
+    AUTH_JWT_SECRET: AUTH_SECRET,
     TICKET_PRIVATE_KEY_CURRENT: generateKeyMaterial(),
     NODE_SHARED_SECRET: 'x'.repeat(48),
     SLUG_SALT: 'salt-for-tests-0123456789abcdef',

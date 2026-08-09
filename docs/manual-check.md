@@ -22,19 +22,25 @@ npm run migrate
 В `.env` для локального прогона:
 
 ```
-AUTH_JWKS_URL=                              # пусто — dev-режим без проверки подписи
+# Любая строка от 32 байт. Ею подписывается тестовый токен и ею же
+# проверяется подпись — режима «без проверки» не существует.
+AUTH_JWT_SECRET=local-dev-jwt-secret-not-the-real-one-0123456789
+AUTH_JWKS_URL=                              # пусто: ветка JWKS не нужна
+
+INTERNAL_SERVICE_SECRET=local-dev-internal-service-secret
 SUBSCRIBER_BASE_URL=http://localhost:4010   # заглушка вместо subscriber.api
 ```
 
-Два терминала:
+Два терминала (заглушка читает `INTERNAL_SERVICE_SECRET` из окружения, поэтому
+запускается из того же `.env`):
 
 ```bash
 npm run mock:subscriber   # терминал 1
 npm run dev               # терминал 2
 ```
 
-В логе старта должно быть предупреждение о том, что подпись токенов не
-проверяется. Если его нет — вы не в dev-режиме.
+В логе старта должно быть `"authMode":"shared-secret"`. Если там `jwks` — у вас
+задан `AUTH_JWKS_URL`.
 
 ## 2. Служебные эндпоинты
 
@@ -51,9 +57,10 @@ curl -s localhost:3000/.well-known/jwks.json
 
 ```bash
 # account_id — UUID, как claim sub у auth-сервиса. Без --sub генерируется
-# случайный (сам UUID печатается в stderr).
+# случайный (сам UUID печатается в stderr). username — то, по чему сервис
+# спросит подписку.
 ACCOUNT=018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b
-TOKEN=$(npm run --silent devtoken -- --sub $ACCOUNT --name "Иван Петров")
+TOKEN=$(npm run --silent devtoken -- --sub $ACCOUNT --username magistrus)
 
 curl -s -X POST localhost:3000/api/tunnel/ticket \
   -H "Authorization: Bearer $TOKEN" \
@@ -76,13 +83,53 @@ curl -s -X POST localhost:3000/api/internal/nodes/heartbeat \
 
 Повторяем запрос тикета — теперь он выдаётся. В ответе:
 
-- `account.host` вида `ivan-petrov.play.ttg.club`;
-- `hosts[1].host` для мира — `ivan-petrov-<6 символов>.play.ttg.club`,
+- `account.host` вида `magistrus.play.ttg.club`;
+- `hosts[1].host` для мира — `magistrus-<6 символов>.play.ttg.club`,
   **через дефис**, не через точку;
 - `expiresAt` через 15 минут.
 
 Проверьте, что адрес закреплён: повторный запрос с тем же `worldId` возвращает
-тот же хост, а с другим именем в токене — тот же слаг аккаунта.
+тот же хост, а с другим `--username` для того же `--sub` — тот же слаг аккаунта.
+
+## 3a. Токены, которые должны получить отказ
+
+Каждая строка — отдельная классическая дыра, все четыре обязаны дать `401`:
+
+```bash
+deny() { curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:3000/api/tunnel/ticket \
+  -H "Authorization: Bearer $1" -H 'content-type: application/json' -d '{}'; }
+
+# подпись выкинута
+deny "$(npm run --silent devtoken -- --sub $ACCOUNT --alg none 2>/dev/null)"
+# алгоритм подменён на асимметричный или на другой HS*
+deny "$(npm run --silent devtoken -- --sub $ACCOUNT --alg HS512)"
+# логин вместо UUID в sub — devtoken откажется его собирать, соберите руками
+# токен без claim username
+```
+
+Заодно проверьте, что чужой секрет не проходит: поменяйте `AUTH_JWT_SECRET` в
+`.env`, перезапустите сервис и повторите запрос со старым токеном — `401`.
+
+## 3b. username со спецсимволами
+
+Экранирование видно в логе заглушки: она печатает `username=` уже после
+декодирования, а путь — как пришёл.
+
+```bash
+TOKEN=$(npm run --silent devtoken -- --username "Иван Петров/x?y=1&z#w")
+curl -s -X POST localhost:3000/api/tunnel/ticket \
+  -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' -d '{}' > /dev/null
+```
+
+В терминале заглушки должна появиться строка с закодированным путём
+(`%D0%98%D0%B2%D0%B0%D0%BD%20...%2Fx%3Fy%3D1%26z%23w`) и с исходным именем в
+`username=` — заглушка печатает его уже после декодирования. Если вместо этого
+прилетело `404`, экранирование сломано: настоящий subscriber на такой запрос
+ответит тем же.
+
+Учтите, что Tomcat по умолчанию отклоняет закодированный слэш (`%2F`) с `400`.
+Для нас это штатный отказ (`503 subscription_unavailable` с записью в лог), а не
+«подписки нет», но имя со слэшем у настоящего subscriber работать не будет.
 
 ## 4. Тикет глазами ноды
 
@@ -132,8 +179,13 @@ warning «использую протухший кэш подписки». Лю�
 сообщением. Вслепую туннель не выдаётся.
 
 Вернуть заглушку: `curl -s -X POST localhost:4010/__mock/mode/ok`.
-Проверить отказ по подписке: `curl -s -X POST localhost:4010/__mock/mode/inactive`
-→ `403 subscription_inactive`.
+
+**Отзыв подписки.** `curl -s -X POST localhost:4010/__mock/mode/inactive` →
+`403 subscription_inactive`, слаг при этом не заводится. Обратите внимание на
+задержку: пока не истёк `SUBSCRIPTION_CACHE_TTL_SECONDS`, ответ придёт из
+свежего кэша и доступ сохранится. Это не баг, а прямое следствие того, что у
+subscriber нет событий об отзыве — см. раздел про задержку отзыва в README.
+Чтобы увидеть отказ сразу, поставьте `SUBSCRIPTION_CACHE_TTL_SECONDS=30`.
 
 ## 7. Учёт трафика и квота
 

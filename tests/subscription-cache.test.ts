@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BYTES_IN_GB, TIERS, quotaLeftGb, resolveTier, type TierLimits } from '../src/domain/limits.js';
+import { BYTES_IN_GB, TIERS, quotaLeftGb, ticketTier, type TierLimits } from '../src/domain/limits.js';
+import { ApiError } from '../src/http/errors.js';
 import {
   SubscriberRejectedError,
   SubscriptionUnavailableError,
@@ -10,6 +11,9 @@ import { capturingLogger, makeConfig, type CapturedLogger } from './helpers.js';
 const TTL_SECONDS = 180;
 const STALE_MAX_SECONDS = 3600;
 
+const SERVICE_TOKEN = 'internal-service-secret-for-tests';
+const STATUS_URL = 'https://subscriber.api.ttg.club/api/internal/subscriptions/magistrus/status';
+
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
     status,
@@ -17,7 +21,16 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-const ACTIVE = { active: true, registered: true, expiresAt: '2027-01-01T00:00:00.000Z' };
+/** Ответ боевой ручки: ровно пять полей. */
+const ACTIVE = {
+  active: true,
+  registered: true,
+  expiresAt: '2026-11-09T18:23:41.512Z',
+  startsAt: '2026-08-09T18:23:41.512Z',
+  type: 'GIFT',
+};
+
+const USER = { accountId: '550e8400-e29b-41d4-a716-446655440000', username: 'magistrus' };
 
 describe('кэш подписки', () => {
   let clock: number;
@@ -36,19 +49,24 @@ describe('кэш подписки', () => {
     logger = capturingLogger();
   });
 
-  it('ходит в сервис подписок с токеном пользователя', async () => {
+  it('ходит в internal-ручку по username со своим service-токеном', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(ACTIVE));
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    const result = await service.get('1', 'user-access-token');
+    const result = await service.get(USER);
 
     expect(result.source).toBe('fresh');
     expect(result.status.active).toBe(true);
+    expect(result.status.type).toBe('GIFT');
     expect(fetchImpl).toHaveBeenCalledOnce();
 
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
-    expect(url).toBe('https://subscriber.api.ttg.club/api/subscriptions/status');
-    expect((init.headers as Record<string, string>)['authorization']).toBe('Bearer user-access-token');
+    expect(url).toBe(STATUS_URL);
+
+    const headers = init.headers as Record<string, string>;
+    expect(headers['x-service-token']).toBe(SERVICE_TOKEN);
+    // Токен пользователя сюда больше не пересылается.
+    expect(headers['authorization']).toBeUndefined();
   });
 
   // Ситуация 1 из таблицы: есть свежий кэш — используем его.
@@ -56,9 +74,9 @@ describe('кэш подписки', () => {
     const fetchImpl = vi.fn(async () => jsonResponse(ACTIVE));
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (TTL_SECONDS - 1) * 1000;
-    const second = await service.get('1', 'token');
+    const second = await service.get(USER);
 
     expect(second.source).toBe('cache');
     expect(second.status.active).toBe(true);
@@ -69,9 +87,9 @@ describe('кэш подписки', () => {
     const fetchImpl = vi.fn(async () => jsonResponse(ACTIVE));
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (TTL_SECONDS + 1) * 1000;
-    const second = await service.get('1', 'token');
+    const second = await service.get(USER);
 
     expect(second.source).toBe('fresh');
     expect(fetchImpl).toHaveBeenCalledTimes(2);
@@ -86,9 +104,9 @@ describe('кэш подписки', () => {
 
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (TTL_SECONDS + 60) * 1000;
-    const stale = await service.get('1', 'token');
+    const stale = await service.get(USER);
 
     expect(stale.source).toBe('stale');
     expect(stale.status.active).toBe(true);
@@ -105,10 +123,10 @@ describe('кэш подписки', () => {
 
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (TTL_SECONDS + 60) * 1000;
 
-    expect((await service.get('1', 'token')).source).toBe('stale');
+    expect((await service.get(USER)).source).toBe('stale');
   });
 
   // Ситуация 3: кэша нет, сервис недоступен — отказ.
@@ -117,9 +135,9 @@ describe('кэш подписки', () => {
       throw new Error('ECONNREFUSED');
     });
 
-    await expect(
-      build(fetchImpl as unknown as typeof fetch).get('1', 'token'),
-    ).rejects.toBeInstanceOf(SubscriptionUnavailableError);
+    await expect(build(fetchImpl as unknown as typeof fetch).get(USER)).rejects.toBeInstanceOf(
+      SubscriptionUnavailableError,
+    );
   });
 
   it('слишком старый кэш уже не спасает', async () => {
@@ -130,85 +148,232 @@ describe('кэш подписки', () => {
 
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (STALE_MAX_SECONDS + 1) * 1000;
 
-    await expect(service.get('1', 'token')).rejects.toBeInstanceOf(SubscriptionUnavailableError);
+    await expect(service.get(USER)).rejects.toBeInstanceOf(SubscriptionUnavailableError);
   });
 
   it('отказ сервиса подписок не прикрывается кэшем', async () => {
     const fetchImpl = vi
       .fn<() => Promise<Response>>()
       .mockResolvedValueOnce(jsonResponse(ACTIVE))
-      .mockResolvedValue(jsonResponse({ error: 'forbidden' }, 403));
+      .mockResolvedValue(jsonResponse({ error: 'unauthorized' }, 401));
 
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    await service.get('1', 'token');
+    await service.get(USER);
     clock += (TTL_SECONDS + 1) * 1000;
 
-    // 403 — это «нам ответили нет», а не «сервис лежит»: подстраховываться
-    // протухшим кэшем здесь нельзя.
-    await expect(service.get('1', 'token')).rejects.toBeInstanceOf(SubscriberRejectedError);
+    // 401 — это «нам ответили нет» (не тот X-Service-Token), а не «сервис
+    // лежит»: подстраховываться протухшим кэшем здесь нельзя.
+    await expect(service.get(USER)).rejects.toBeInstanceOf(SubscriberRejectedError);
   });
 
-  it('неизвестный сервису аккаунт — это определённый ответ, а не сбой', async () => {
+  // Ключевое отличие internal-ручки: неизвестный пользователь получает
+  // 200 active:false, а 404 означает, что мы попали не на тот URL.
+  it('404 — это сломанный запрос, а не отсутствие подписки', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ error: 'not found' }, 404));
-    const result = await build(fetchImpl as unknown as typeof fetch).get('1', 'token');
 
-    expect(result.status).toEqual({ active: false, registered: false, expiresAt: null, tier: null });
+    await expect(build(fetchImpl as unknown as typeof fetch).get(USER)).rejects.toBeInstanceOf(
+      SubscriberRejectedError,
+    );
+
+    const complaint = logger.records.find((record) => record.msg.includes('404'));
+    expect(complaint?.level).toBe('error');
+  });
+
+  it('неизвестный пользователь — это 200 с active:false', async () => {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ active: false, registered: false, expiresAt: null, startsAt: null, type: null }),
+    );
+
+    const result = await build(fetchImpl as unknown as typeof fetch).get(USER);
+
+    expect(result.source).toBe('fresh');
+    expect(result.status).toEqual({
+      active: false,
+      registered: false,
+      expiresAt: null,
+      startsAt: null,
+      type: null,
+    });
+  });
+
+  // Отзыв виден только опросом, поэтому фиксируем момент, когда узнали.
+  it('переход в неактивную подписку попадает в лог', async () => {
+    const fetchImpl = vi
+      .fn<() => Promise<Response>>()
+      .mockResolvedValueOnce(jsonResponse(ACTIVE))
+      .mockResolvedValue(jsonResponse({ ...ACTIVE, active: false }));
+
+    const service = build(fetchImpl as unknown as typeof fetch);
+
+    await service.get(USER);
+    clock += (TTL_SECONDS + 1) * 1000;
+    const second = await service.get(USER);
+
+    expect(second.status.active).toBe(false);
+    expect(logger.records.some((record) => record.msg.includes('стала неактивной'))).toBe(true);
   });
 
   it('пачка параллельных запросов даёт один поход в сервис', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse(ACTIVE));
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    const results = await Promise.all([
-      service.get('1', 'token'),
-      service.get('1', 'token'),
-      service.get('1', 'token'),
-    ]);
+    const results = await Promise.all([service.get(USER), service.get(USER), service.get(USER)]);
 
     expect(fetchImpl).toHaveBeenCalledOnce();
     expect(results.every((result) => result.status.active)).toBe(true);
   });
 
-  it('кэш раздельный по аккаунтам', async () => {
+  it('кэш раздельный по пользователям', async () => {
     const fetchImpl = vi
       .fn<() => Promise<Response>>()
       .mockResolvedValueOnce(jsonResponse(ACTIVE))
-      .mockResolvedValueOnce(jsonResponse({ active: false, registered: true }));
+      .mockResolvedValueOnce(jsonResponse({ ...ACTIVE, active: false }));
 
     const service = build(fetchImpl as unknown as typeof fetch);
 
-    expect((await service.get('1', 'token')).status.active).toBe(true);
-    expect((await service.get('2', 'token')).status.active).toBe(false);
+    expect((await service.get(USER)).status.active).toBe(true);
+    expect((await service.get({ accountId: USER.accountId, username: 'другой' })).status.active).toBe(
+      false,
+    );
     expect(service.cacheSize).toBe(2);
   });
 
   it('непонятный ответ считается сбоем сервиса, а не активной подпиской', async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ unexpected: true }));
 
-    await expect(
-      build(fetchImpl as unknown as typeof fetch).get('1', 'token'),
-    ).rejects.toBeInstanceOf(SubscriptionUnavailableError);
+    await expect(build(fetchImpl as unknown as typeof fetch).get(USER)).rejects.toBeInstanceOf(
+      SubscriptionUnavailableError,
+    );
+  });
+});
+
+describe('username в URL', () => {
+  const config = makeConfig();
+
+  async function urlFor(username: string): Promise<string> {
+    const fetchImpl = vi.fn(async () =>
+      jsonResponse({ active: true, registered: true, expiresAt: null, startsAt: null, type: null }),
+    );
+
+    await createSubscriptionService({
+      config,
+      logger: capturingLogger(),
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    }).get({ accountId: '550e8400-e29b-41d4-a716-446655440000', username });
+
+    return (fetchImpl.mock.calls[0] as unknown as [string])[0];
+  }
+
+  it('кириллица кодируется', async () => {
+    expect(await urlFor('Иван')).toBe(
+      'https://subscriber.api.ttg.club/api/internal/subscriptions/%D0%98%D0%B2%D0%B0%D0%BD/status',
+    );
+  });
+
+  it('пробелы и спецсимволы кодируются', async () => {
+    expect(await urlFor('иван петров#1?x=1&y')).toContain(
+      '/subscriptions/%D0%B8%D0%B2%D0%B0%D0%BD%20%D0%BF%D0%B5%D1%82%D1%80%D0%BE%D0%B2%231%3Fx%3D1%26y/status',
+    );
+  });
+
+  // Слэш в имени разрезал бы path на лишние сегменты.
+  it('слэш не ломает путь', async () => {
+    expect(await urlFor('a/b')).toBe(
+      'https://subscriber.api.ttg.club/api/internal/subscriptions/a%2Fb/status',
+    );
+  });
+
+  it('точка внутри имени остаётся обычным символом', async () => {
+    expect(await urlFor('ivan.petrov')).toBe(
+      'https://subscriber.api.ttg.club/api/internal/subscriptions/ivan.petrov/status',
+    );
+  });
+
+  // Единственный случай, от которого не спасает кодирование: `.` и `..`
+  // нормализатор URL схлопывает как сегменты пути (и `%2E%2E` тоже), поэтому
+  // такое имя отклоняется, а не отправляется вслепую на соседний эндпоинт.
+  it('имя из точек отклоняется, а не уводит запрос на другой эндпоинт', async () => {
+    await expect(urlFor('..')).rejects.toBeInstanceOf(ApiError);
+    await expect(urlFor('.')).rejects.toBeInstanceOf(ApiError);
+
+    // Три точки — уже обычный сегмент, его схлопывать нечему.
+    expect(await urlFor('...')).toBe(
+      'https://subscriber.api.ttg.club/api/internal/subscriptions/.../status',
+    );
+  });
+
+  // Кодированные точки приезжают строкой и сегментом пути не становятся.
+  it('%2e%2e в имени безопасно', async () => {
+    expect(await urlFor('%2e%2e')).toBe(
+      'https://subscriber.api.ttg.club/api/internal/subscriptions/%252e%252e/status',
+    );
+  });
+});
+
+describe('разбор дат из ответа', () => {
+  const config = makeConfig();
+
+  async function statusFor(body: Record<string, unknown>) {
+    const fetchImpl = vi.fn(async () => jsonResponse(body));
+
+    return (
+      await createSubscriptionService({
+        config,
+        logger: capturingLogger(),
+        fetchImpl: fetchImpl as unknown as typeof fetch,
+      }).get({ accountId: '550e8400-e29b-41d4-a716-446655440000', username: 'magistrus' })
+    ).status;
+  }
+
+  const base = { active: true, registered: true };
+
+  it('ISO-8601 — умолчание Spring', async () => {
+    const status = await statusFor({ ...base, expiresAt: '2026-11-09T18:23:41.512Z' });
+    expect(status.expiresAt).toBe('2026-11-09T18:23:41.512Z');
+  });
+
+  it('таймстамп в секундах понимается', async () => {
+    const status = await statusFor({ ...base, expiresAt: 1_762_712_621.512 });
+    expect(status.expiresAt).toBe('2025-11-09T18:23:41.512Z');
+  });
+
+  it('таймстамп в миллисекундах понимается', async () => {
+    const status = await statusFor({ ...base, expiresAt: 1_762_712_621_512 });
+    expect(status.expiresAt).toBe('2025-11-09T18:23:41.512Z');
+  });
+
+  // Даты справочные: непонятное значение не должно отнимать у человека тикет.
+  it('мусор вместо даты становится null, а не отказом', async () => {
+    const status = await statusFor({ ...base, expiresAt: { year: 2026 }, startsAt: 'вчера' });
+
+    expect(status.active).toBe(true);
+    expect(status.expiresAt).toBeNull();
+    expect(status.startsAt).toBeNull();
+  });
+
+  it('незнакомый type переносится как есть и на доступ не влияет', async () => {
+    const status = await statusFor({ ...base, type: 'PROMO' });
+
+    expect(status.active).toBe(true);
+    expect(status.type).toBe('PROMO');
   });
 });
 
 describe('тариф', () => {
-  it('отсутствующий tier заменяется значением по умолчанию', () => {
-    const logger = capturingLogger();
-    expect(resolveTier(null, 'pro', logger).name).toBe('pro');
-    expect(resolveTier(undefined, 'pro', logger).limits.maxWorlds).toBe(5);
-    expect(logger.records.filter((r) => r.level === 'warn')).toHaveLength(0);
-  });
-
-  it('известный tier применяется как есть', () => {
-    const tier = resolveTier('pro', 'pro', capturingLogger());
+  it('берётся из конфига, а не из ответа subscriber', () => {
+    const tier = ticketTier('pro');
 
     expect(tier.name).toBe('pro');
     // Цифры беты: 5 миров, 1000 потоков, 10 ТБ в месяц.
     expect(tier.limits).toEqual({ maxWorlds: 5, maxStreams: 1000, quotaGb: 10_240 });
+  });
+
+  it('незнакомое имя тарифа — ошибка, а не тихий фолбэк', () => {
+    expect(() => ticketTier('platinum')).toThrow(/platinum/);
   });
 
   it('бесплатного тарифа нет: без подписки сервисом не пользуются', () => {
@@ -224,13 +389,5 @@ describe('тариф', () => {
     expect(quotaLeftGb(limits, quota - 1n)).toBe(1);
     expect(quotaLeftGb(limits, quota)).toBe(0);
     expect(quotaLeftGb(limits, quota * 2n)).toBe(0);
-  });
-
-  it('незнакомый tier не ломает выдачу, но попадает в лог', () => {
-    const logger = capturingLogger();
-    const tier = resolveTier('platinum', 'pro', logger);
-
-    expect(tier.name).toBe('pro');
-    expect(logger.records.some((record) => record.level === 'warn')).toBe(true);
   });
 });

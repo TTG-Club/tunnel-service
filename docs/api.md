@@ -22,8 +22,8 @@
 | `worlds_limit_exceeded` | 403 | миров в запросе больше, чем позволяет тариф |
 | `quota_exceeded` | 403 | квота трафика за месяц исчерпана |
 | `rate_limited` | 429 | слишком много запросов тикета; в ответе `Retry-After` |
-| `auth_unavailable` | 503 | не смогли забрать JWKS auth-сервиса |
-| `subscription_unavailable` | 503 | сервис подписок недоступен и кэша нет |
+| `auth_unavailable` | 503 | не смогли забрать JWKS auth-сервиса (только в режиме JWKS) |
+| `subscription_unavailable` | 503 | сервис подписок недоступен и кэша нет либо отклонил наш запрос |
 | `no_nodes_available` | 503 | нет ни одной живой ноды |
 | `internal_error` | 500 | всё остальное |
 
@@ -32,6 +32,11 @@
 ## Для приложения мастера
 
 Авторизация: `Authorization: Bearer <access token пользователя>`.
+
+Токен auth-сервиса, подписанный HS256 общим секретом. Из него берутся ровно два
+claim'а: `sub` (UUID аккаунта) и `username` (по нему проверяется подписка).
+Токен с другим алгоритмом, без `exp`, с не-UUID в `sub` или без `username`
+получает `401 unauthorized`.
 
 ### POST /api/tunnel/ticket
 
@@ -72,15 +77,27 @@
   "subscription": {
     "active": true,
     "registered": true,
-    "expiresAt": "2027-01-01T00:00:00.000Z",
+    "expiresAt": "2026-11-09T18:23:41.512Z",
+    "startsAt": "2026-08-09T18:23:41.512Z",
+    "type": "GIFT",
     "source": "cache"
   }
 }
 ```
 
-`subscription.source` — откуда взят статус подписки: `fresh` (сходили в
-subscriber.api), `cache` (свежий кэш), `stale` (протухший кэш, сервис подписок
-недоступен). Поле диагностическое, на решение клиента влиять не должно.
+`tier` — константа сервиса (`TICKET_TIER`), а не свойство подписки: тарифов у
+`subscriber.api` не существует.
+
+В блоке `subscription` решение о доступе отражает **только** `active`.
+Остальное — справочное:
+
+- `registered` — «когда-либо имел подписку», у отозванного остаётся `true`;
+- `type` — `GIFT` или `BUY`, способ появления подписки, не тариф;
+- `expiresAt`/`startsAt` — могут быть `null`, в том числе если сервис подписок
+  вернул дату в неожиданном формате;
+- `source` — откуда взят статус: `fresh` (сходили в subscriber.api), `cache`
+  (свежий кэш), `stale` (протухший кэш, сервис подписок недоступен). Поле
+  диагностическое, на решение клиента влиять не должно.
 
 Порядок проверок (важен: слаг и тикет не появляются раньше, чем подтверждена
 подписка):
@@ -88,8 +105,8 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 1. лимит по IP — иначе `rate_limited`;
 2. токен пользователя;
 3. лимит по аккаунту (до похода в subscriber.api) — иначе `rate_limited`;
-4. активная подписка — иначе `subscription_inactive`. **Без активной подписки
-   тикет не выдаётся и слаг аккаунту не заводится**;
+4. активная подписка — иначе `subscription_inactive`. Гейт строго по `active`.
+   **Без активной подписки тикет не выдаётся и слаг аккаунту не заводится**;
 5. тариф и число миров — иначе `worlds_limit_exceeded`;
 6. остаток квоты — иначе `quota_exceeded`;
 7. живая нода — иначе `no_nodes_available`;
@@ -117,7 +134,14 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
     "leftGb": 10237
   },
   "worlds": [{ "worldId": "abc123", "slug": "ivan-a7k2m9", "host": "ivan-a7k2m9.play.ttg.club" }],
-  "subscription": { "active": true, "registered": true, "expiresAt": null, "source": "cache" }
+  "subscription": {
+    "active": true,
+    "registered": true,
+    "expiresAt": "2026-11-09T18:23:41.512Z",
+    "startsAt": "2026-08-09T18:23:41.512Z",
+    "type": "GIFT",
+    "source": "cache"
+  }
 }
 ```
 
@@ -199,7 +223,7 @@ subscriber.api), `cache` (свежий кэш), `stale` (протухший кэ
 
 ### GET /ready
 
-`200 { "status": "ready", "authMode": "jwks" }` либо `503` с
+`200 { "status": "ready", "authMode": "shared-secret" }` либо `503` с
 `{ "status": "unavailable", "reason": "database" }` / `{ "status": "shutting-down" }`.
 
 ### GET /.well-known/jwks.json
@@ -248,6 +272,10 @@ RFC 7638 thumbprint публичного ключа.
 
 `hosts` — метки без домена: что мастеру разрешено регистрировать на ноде.
 Полный адрес нода собирает сама, приклеивая свой публичный домен.
+
+`tier` — константа сервиса (`TICKET_TIER`), а не свойство подписки: тарифов у
+`subscriber.api` нет. Поле оставлено на будущее, ноде опираться на него не
+следует — лимиты приходят в `limits`.
 
 Что должна проверять нода: подпись по JWKS (с кэшем и учётом `kid`), `exp`,
 `iss`, `aud`, а также что регистрируемый хост входит в `hosts` и что `node`

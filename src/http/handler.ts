@@ -88,16 +88,15 @@ export function getBearerToken(event: H3Event): string {
   return (match[1] as string).trim();
 }
 
-export interface UserContext {
-  readonly user: AuthenticatedUser;
-  readonly accessToken: string;
-}
-
-export async function requireUser(services: AppServices, event: H3Event): Promise<UserContext> {
-  const accessToken = getBearerToken(event);
-  const user = await services.auth.verify(accessToken);
+/**
+ * Токен пользователя нужен только для того, чтобы опознать аккаунт: в
+ * subscriber.api мы ходим своим service-токеном, пользовательский туда больше
+ * не пересылается. Поэтому наружу отдаётся сам аккаунт, а не токен.
+ */
+export async function requireUser(services: AppServices, event: H3Event): Promise<AuthenticatedUser> {
+  const user = await services.auth.verify(getBearerToken(event));
   event.context['accountId'] = user.accountId;
-  return { user, accessToken };
+  return user;
 }
 
 /**

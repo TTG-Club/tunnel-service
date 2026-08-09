@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { toNodeListener } from 'h3';
 import { SignJWT } from 'jose';
@@ -14,9 +14,10 @@ import { createRateLimiter } from '../src/http/rate-limit.js';
 import type { AppServices } from '../src/services.js';
 import { createUserTokenVerifier } from '../src/upstream/auth.js';
 import type { SubscriptionResult } from '../src/upstream/subscriber.js';
-import { capturingLogger, makeConfig, type CapturedLogger } from './helpers.js';
+import { AUTH_SECRET, capturingLogger, makeConfig, type CapturedLogger } from './helpers.js';
 
 const ACCOUNT_ID = '018f3a2b-1c4d-7e8f-9a0b-1c2d3e4f5a6b';
+const USERNAME = 'magistrus';
 const PRO = TIERS['pro'] as TierLimits;
 
 const NODE: NodeRow = {
@@ -38,7 +39,13 @@ function worldRow(accountId: string, slug: string, worldId: string): SlugRow {
 }
 
 const activeSubscription: SubscriptionResult = {
-  status: { active: true, registered: true, expiresAt: '2027-01-01T00:00:00.000Z', tier: null },
+  status: {
+    active: true,
+    registered: true,
+    expiresAt: '2027-01-01T00:00:00.000Z',
+    startsAt: '2026-01-01T00:00:00.000Z',
+    type: 'GIFT',
+  },
   source: 'fresh',
   fetchedAt: new Date(),
 };
@@ -50,6 +57,7 @@ interface Harness {
   readonly logger: CapturedLogger;
   readonly ensureAccountSlug: ReturnType<typeof vi.fn>;
   readonly ensureWorldSlug: ReturnType<typeof vi.fn>;
+  readonly subscriptionFor: ReturnType<typeof vi.fn>;
   readonly close: () => Promise<void>;
 }
 
@@ -77,6 +85,7 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
   const ensureWorldSlug = vi.fn(async (accountId: string, _parent: string, worldId: string) =>
     worldRow(accountId, `ivan-${worldId.replace(/[^a-z0-9]/g, '').slice(0, 6)}`, worldId),
   );
+  const subscriptionFor = vi.fn(async () => options.subscription ?? activeSubscription);
 
   const services: AppServices = {
     config,
@@ -105,7 +114,7 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
       applyNodeUsage: async () => ({ applied: 0, accounts: 0, regressions: 0, deltas: [] }),
     },
     subscription: {
-      get: async () => options.subscription ?? activeSubscription,
+      get: subscriptionFor as unknown as AppServices['subscription']['get'],
       cacheSize: 0,
     },
     auth: createUserTokenVerifier(config, logger),
@@ -135,18 +144,19 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
     logger,
     ensureAccountSlug,
     ensureWorldSlug,
+    subscriptionFor,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
 
-/** Токен как у auth-сервиса: подпись в dev-режиме не проверяется. */
-async function userToken(sub: string = ACCOUNT_ID): Promise<string> {
-  return new SignJWT({ name: 'Иван Петров' })
-    .setProtectedHeader({ alg: 'HS256' })
+/** Настоящий токен auth-сервиса: HS256 на общем секрете, sub — UUID, имя в username. */
+async function userToken(sub: string = ACCOUNT_ID, username: string = USERNAME): Promise<string> {
+  return new SignJWT({ username, email: 'user@example.com', roles: ['USER', 'VTTG'] })
+    .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
     .setSubject(sub)
     .setIssuedAt()
-    .setExpirationTime('1h')
-    .sign(randomBytes(32));
+    .setExpirationTime('15m')
+    .sign(new TextEncoder().encode(AUTH_SECRET));
 }
 
 async function requestTicket(
@@ -183,7 +193,9 @@ describe('POST /api/tunnel/ticket', () => {
     expect(status).toBe(200);
     expect(body['node']).toMatchObject({ id: 'eu-1', hostname: 'eu-1.play.ttg.club' });
     expect(body['account']).toEqual({ slug: 'ivan', host: 'ivan.play.ttg.club' });
+    // Тариф — константа из конфига: subscriber о тарифах ничего не сообщает.
     expect(body['tier']).toBe('pro');
+    expect(body['subscription']).toMatchObject({ active: true, type: 'GIFT' });
     expect(body['limits']).toMatchObject({ maxWorlds: 5, maxStreams: 1000, quotaGb: 10_240 });
     expect(body['hosts']).toEqual([
       { kind: 'account', slug: 'ivan', host: 'ivan.play.ttg.club' },
@@ -213,11 +225,28 @@ describe('POST /api/tunnel/ticket', () => {
     });
   });
 
+  it('подписка спрашивается по username из токена, а не по account_id', async () => {
+    harness = await startApp();
+    await requestTicket(harness, await userToken(ACCOUNT_ID, 'Иван Петров'));
+
+    expect(harness.subscriptionFor).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: ACCOUNT_ID, username: 'Иван Петров' }),
+    );
+  });
+
   // Главное требование: без подписки сервисом воспользоваться нельзя.
-  it('без подписки отказывает и НЕ заводит слаг', async () => {
+  // `registered: true` здесь принципиален — «когда-либо имел подписку» доступа
+  // не даёт, гейт строго по active.
+  it('свежий active:false — отказ, и слаг НЕ заводится', async () => {
     harness = await startApp({
       subscription: {
-        status: { active: false, registered: true, expiresAt: null, tier: null },
+        status: {
+          active: false,
+          registered: true,
+          expiresAt: '2027-01-01T00:00:00.000Z',
+          startsAt: '2026-01-01T00:00:00.000Z',
+          type: 'GIFT',
+        },
         source: 'fresh',
         fetchedAt: new Date(),
       },
@@ -278,13 +307,27 @@ describe('POST /api/tunnel/ticket', () => {
     expect((body['error'] as Record<string, unknown>)['code']).toBe('no_nodes_available');
   });
 
-  it('нечисловой sub больше не нужен, а не-UUID отвергается', async () => {
+  it('не-UUID в sub отвергается', async () => {
     harness = await startApp();
 
-    const { status, body } = await requestTicket(harness, await userToken('12345'));
+    const { status, body } = await requestTicket(harness, await userToken('magistrus'));
 
     expect(status).toBe(401);
     expect((body['error'] as Record<string, unknown>)['message']).toContain('UUID');
+  });
+
+  it('токен, подписанный чужим секретом, отвергается', async () => {
+    harness = await startApp();
+
+    const foreign = await new SignJWT({ username: USERNAME })
+      .setProtectedHeader({ alg: 'HS256', typ: 'JWT' })
+      .setSubject(ACCOUNT_ID)
+      .setIssuedAt()
+      .setExpirationTime('15m')
+      .sign(new TextEncoder().encode('совершенно-другой-секрет-длиной-в-32+'));
+
+    expect((await requestTicket(harness, foreign)).status).toBe(401);
+    expect(harness.ensureAccountSlug).not.toHaveBeenCalled();
   });
 
   it('лимит по аккаунту отдаёт 429 с Retry-After', async () => {
