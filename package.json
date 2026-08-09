@@ -18,6 +18,7 @@
     "gen:salt": "tsx src/cli/gen-salt.ts",
     "devtoken": "tsx src/cli/devtoken.ts",
     "mock:subscriber": "node tools/subscriber-mock.mjs",
+    "smoke": "node tools/smoke.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

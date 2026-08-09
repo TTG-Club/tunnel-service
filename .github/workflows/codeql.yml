@@ -1,6 +1,12 @@
 name: CodeQL
 
 on:
+  # В этом репозитории изменения приезжают прямо в main, pull request'ы —
+  # редкость. Без триггера на push скан не запускался бы вообще никогда.
+  push:
+    branches:
+      - main
+
   pull_request:
     types:
       - opened
@@ -9,6 +15,11 @@ on:
       - ready_for_review
       - review_requested
       - auto_merge_enabled
+
+  # Раз в неделю: находит уязвимости в коде, который давно не трогали, и в
+  # зависимостях, про которые правила появились уже после коммита.
+  schedule:
+    - cron: '17 4 * * 1'
 
   workflow_call:
 
@@ -26,8 +37,11 @@ jobs:
     name: Analyze
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    permissions:
-      security-events: write
+    timeout-minutes: 20
+
+    # permissions на уровне job'а ЗАМЕНЯЕТ блок workflow целиком, а не
+    # дополняет его. Поэтому здесь его нет: иначе job остался бы без
+    # contents: read и checkout не смог бы склонировать репозиторий.
 
     steps:
       - name: Checkout repository
@@ -36,10 +50,15 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
-          languages: typescript
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+          # Канонический идентификатор языка в CodeQL v3: он покрывает и
+          # JavaScript, и TypeScript одним анализом.
+          languages: javascript-typescript
+          # Сборка для анализа не нужна — CodeQL читает исходники как есть.
+          # Отдельный шаг autobuild для JS/TS бесполезен и только добавляет
+          # точку отказа.
+          build-mode: none
 
       - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
+        with:
+          category: /language:javascript-typescript
