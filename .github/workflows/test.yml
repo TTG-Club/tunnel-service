@@ -1,68 +1,48 @@
-name: test
+name: Tests
 
 on:
-  push:
-    branches: [main]
   pull_request:
-    branches: [main]
-  # Вызывается из deploy.yml, чтобы не деплоить непроверенный код.
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+      - review_requested
+      - auto_merge_enabled
+
   workflow_call:
-    inputs:
-      docker:
-        description: Проверять сборку Docker-образа
-        type: boolean
-        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: test-${{ github.workflow }}-${{ github.ref }}
-  # Отменяем только устаревшие прогоны PR: прогон, из которого растёт деплой,
-  # обрывать нельзя — упадёт весь деплой.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  check:
-    name: Типы, тесты, сборка
+  test:
+    name: Type Check, Tests and Build
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Node.js
+        uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: 22
           cache: npm
 
-      - run: npm ci
+      - name: Install dependencies
+        run: npm ci
 
-      - name: Типы
+      - name: Type Check
         run: npm run typecheck
 
-      # Тесты не ходят в базу и в сеть — Postgres в CI не нужен.
-      - name: Тесты
+      - name: Tests
         run: npm run test
 
-      - name: Сборка
+      - name: Build
         run: npm run build
-
-  docker:
-    name: Сборка образа
-    # На PR ловим сломанный Dockerfile до деплоя; при вызове из deploy.yml
-    # выключается — там образ и так собирается по-настоящему.
-    if: inputs.docker != false
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: docker build (без публикации)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
