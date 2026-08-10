@@ -117,8 +117,12 @@ export async function migrationStatus(pool: Pool, dir = migrationsDir()): Promis
 
 /**
  * Применяет неприменённые миграции. Каждая — в своей транзакции, весь прогон —
- * под advisory-lock. Вызывается только из CLI: приложение при старте миграции
- * не накатывает.
+ * под advisory-lock, поэтому одновременный запуск на нескольких инстансах
+ * безопасен.
+ *
+ * Вызывается из CLI, а он — из `CMD` образа перед стартом приложения. Сам
+ * серверный процесс миграции не накатывает: к моменту его запуска схема уже
+ * приведена в порядок, иначе контейнер до него не дошёл бы.
  */
 export async function migrateUp(pool: Pool, logger: Logger, dir = migrationsDir()): Promise<string[]> {
   const files = loadMigrations(dir);
