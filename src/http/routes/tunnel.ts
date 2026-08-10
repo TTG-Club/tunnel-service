@@ -182,6 +182,11 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
         },
       );
 
+      // Помним, какой ноде выдали тикет для этого аккаунта: по этой памяти
+      // проверяются отчёты о трафике (нода не вправе записывать расход тем,
+      // кого ей не поручали).
+      await services.usage.rememberTicketGrant(user.accountId, node.id);
+
       logger.info('выдан тикет', {
         accountId: user.accountId,
         slug: accountSlug.slug,

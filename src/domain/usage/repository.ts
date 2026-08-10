@@ -42,6 +42,17 @@ export interface ApplyUsageResult {
 export interface UsageRepository {
   getAccountUsage(accountId: string, period: string): Promise<AccountUsage>;
   applyNodeUsage(nodeId: string, items: readonly UsageReportItem[]): Promise<ApplyUsageResult>;
+  /** Запоминает, что этой ноде выдавался тикет для этого аккаунта. */
+  rememberTicketGrant(accountId: string, nodeId: string): Promise<void>;
+  /**
+   * Отбирает из списка те аккаунты, которым эта нода действительно выдавалась.
+   *
+   * Отчёт о трафике приходит с общим секретом нод, поэтому одна
+   * скомпрометированная нода могла записать расход ЛЮБОМУ аккаунту и
+   * исчерпать ему квоту. Сервис сам выбирает ноду при выдаче тикета — здесь
+   * он этой памятью и пользуется.
+   */
+  filterGrantedAccounts(nodeId: string, accountIds: readonly string[]): Promise<Set<string>>;
 }
 
 /** Период учёта — календарный месяц по UTC: '2026-08'. */
@@ -75,6 +86,27 @@ function dedupe(items: readonly UsageReportItem[]): UsageReportItem[] {
 
 export function createUsageRepository(pool: Pool): UsageRepository {
   return {
+    async rememberTicketGrant(accountId, nodeId) {
+      await pool.query(
+        `insert into ticket_grants (account_id, node_id)
+         values ($1, $2)
+         on conflict (account_id, node_id) do update set issued_at = now()`,
+        [accountId, nodeId],
+      );
+    },
+
+    async filterGrantedAccounts(nodeId, accountIds) {
+      if (accountIds.length === 0) return new Set<string>();
+
+      const { rows } = await pool.query<{ account_id: string }>(
+        `select account_id from ticket_grants
+          where node_id = $1 and account_id = any($2::uuid[])`,
+        [nodeId, [...new Set(accountIds)]],
+      );
+
+      return new Set(rows.map((row) => row.account_id));
+    },
+
     async getAccountUsage(accountId, period) {
       const { rows } = await pool.query<{ bytes_in: string; bytes_out: string }>(
         'select bytes_in, bytes_out from usage where account_id = $1 and period = $2',

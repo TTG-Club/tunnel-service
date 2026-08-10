@@ -86,6 +86,8 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
     worldRow(accountId, `ivan-${worldId.replace(/[^a-z0-9]/g, '').slice(0, 6)}`, worldId),
   );
   const subscriptionFor = vi.fn(async () => options.subscription ?? activeSubscription);
+  /** Кому и на какую ноду выдавался тикет: ключ `accountId:nodeId`. */
+  const grants = new Set<string>();
 
   const services: AppServices = {
     config,
@@ -112,6 +114,13 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
         return { bytesIn: total, bytesOut: 0n, total };
       },
       applyNodeUsage: async () => ({ applied: 0, accounts: 0, regressions: 0, deltas: [] }),
+      // Выдачи запоминаются в памяти: по ним проверяется, вправе ли нода
+      // присылать расход по этому аккаунту.
+      rememberTicketGrant: async (accountId: string, nodeId: string) => {
+        grants.add(`${accountId}:${nodeId}`);
+      },
+      filterGrantedAccounts: async (nodeId: string, accountIds: readonly string[]) =>
+        new Set(accountIds.filter((accountId) => grants.has(`${accountId}:${nodeId}`))),
     },
     subscription: {
       get: subscriptionFor as unknown as AppServices['subscription']['get'],

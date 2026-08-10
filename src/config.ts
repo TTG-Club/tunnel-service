@@ -59,6 +59,8 @@ export interface AppConfig {
     readonly warnPercent: number;
     /** Прирост за сутки, после которого расход помечается подозрительным. */
     readonly spikeGbPerDay: number;
+    /** Потолок прироста расхода одного аккаунта за ОДИН отчёт, ГБ */
+    readonly maxReportGrowthGb: number;
   };
 }
 
@@ -88,7 +90,11 @@ const schema = z.object({
   // За Dokploy/Traefik реальный адрес клиента приходит в X-Forwarded-For.
   // Если сервис когда-нибудь будет смотреть в интернет напрямую — выключить,
   // иначе заголовок можно подделать и обойти лимит по IP.
-  TRUST_PROXY: envBool(true),
+  // ⚠️ По умолчанию НЕ доверяем X-Forwarded-For. Заголовок ставит кто угодно,
+  // и с доверием по умолчанию лимит запросов по IP обходится подстановкой
+  // случайного значения, а в логи попадают выдуманные адреса. За обратным
+  // прокси (Dokploy/Traefik) включается явно: TRUST_PROXY=true.
+  TRUST_PROXY: envBool(false),
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   SHUTDOWN_TIMEOUT_MS: envInt(15_000, 0, 300_000),
 
@@ -149,6 +155,11 @@ const schema = z.object({
 
   QUOTA_WARN_PERCENT: envInt(80, 1, 100),
   QUOTA_SPIKE_GB_PER_DAY: envInt(100, 1, 1_000_000),
+  // Потолок прироста за один отчёт. Ноды присылают накопительные счётчики
+  // каждые несколько минут, поэтому честный прирост измеряется гигабайтами, а
+  // не терабайтами. Значение с большим запасом: оно ловит не «много играли», а
+  // попытку разом записать месячную квоту.
+  QUOTA_MAX_REPORT_GROWTH_GB: envInt(512, 1, 1_000_000),
 });
 
 /**
@@ -249,6 +260,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     quota: {
       warnPercent: raw.QUOTA_WARN_PERCENT,
       spikeGbPerDay: raw.QUOTA_SPIKE_GB_PER_DAY,
+      maxReportGrowthGb: raw.QUOTA_MAX_REPORT_GROWTH_GB,
     },
   };
 }

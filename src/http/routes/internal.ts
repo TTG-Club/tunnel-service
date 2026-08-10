@@ -100,7 +100,49 @@ export function registerInternalRoutes(router: Router, services: AppServices): v
       const body = await readJsonBody(event, usageSchema);
       const logger = requestLogger(services, event);
 
-      const result = await services.usage.applyNodeUsage(body.nodeId, body.items);
+      // ⚠️ Отчёт принимается ТОЛЬКО по тем аккаунтам, которым эта нода
+      // действительно выдавалась. Раньше принимался любой account_id: общий
+      // секрет нод превращал одну скомпрометированную ноду в способ выключить
+      // доступ любому подписчику — записал ему исчерпанную квоту, и до конца
+      // месяца тикетов не будет.
+      const granted = await services.usage.filterGrantedAccounts(
+        body.nodeId,
+        body.items.map((item) => item.accountId),
+      );
+
+      const acceptedItems = body.items.filter((item) => granted.has(item.accountId));
+      const rejectedCount = body.items.length - acceptedItems.length;
+
+      if (rejectedCount > 0) {
+        logger.warn('нода прислала расход по аккаунтам, которых ей не поручали', {
+          node: body.nodeId,
+          rejected: rejectedCount,
+          suspicious: true,
+        });
+      }
+
+      const result = await services.usage.applyNodeUsage(body.nodeId, acceptedItems);
+
+      // Потолок прироста за ОДИН отчёт. Счётчики накопительные и приходят
+      // каждые несколько минут, поэтому честный прирост измеряется гигабайтами.
+      // Скачок в сотни — либо сбой счётчика ноды, либо попытка разом выжечь
+      // человеку месячную квоту. Ничего не откатываем (данные уже применены), но
+      // говорим об этом громко: тихо принять такое значение хуже всего.
+      const growthLimitBytes =
+        BigInt(services.config.quota.maxReportGrowthGb) * BYTES_IN_GB;
+
+      for (const delta of result.deltas) {
+        if (delta.deltaBytes > growthLimitBytes) {
+          logger.error('прирост расхода за один отчёт выше потолка', {
+            accountId: delta.accountId,
+            period: delta.period,
+            node: body.nodeId,
+            deltaGb: Number(delta.deltaBytes / BYTES_IN_GB),
+            limitGb: services.config.quota.maxReportGrowthGb,
+            suspicious: true,
+          });
+        }
+      }
 
       if (result.regressions > 0) {
         logger.warn('счётчики ноды уменьшились — похоже, нода потеряла состояние', {
