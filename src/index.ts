@@ -1,12 +1,46 @@
 import { createServer, type Server } from 'node:http';
 import { toNodeListener } from 'h3';
 import { ConfigError, loadConfig, type AppConfig } from './config.js';
+import { migrationStatus } from './db/migrator.js';
 import { createHttpApp } from './http/app.js';
 import { createLogger, type Logger } from './logger.js';
 import { createServices, type AppServices } from './services.js';
 import { loadDotEnv } from './util/dotenv.js';
 
 const DRAIN_POLL_MS = 100;
+
+/**
+ * Сообщает в лог о неприменённых миграциях.
+ *
+ * Миграции по-прежнему накатывает не приложение, а отдельный шаг выката — это
+ * осознанное решение, и оно не меняется. Меняется то, что расхождение схемы
+ * перестаёт быть НЕВИДИМЫМ.
+ *
+ * Стоило шагу миграций отсутствовать в конвейере, и сервис поднимался бодрым,
+ * отвечал на /health, а падал только там, где код трогал недостающую таблицу.
+ * Снаружи это выглядело как «у всех перестал работать туннель» — искать причину
+ * приходилось по цепочке из трёх репозиториев. Одна строка в логе старта
+ * закрывает этот класс расследований целиком.
+ *
+ * Старт при этом НЕ отменяется: часть сервиса, не зависящая от новой таблицы,
+ * работает, и уронить всё ради одной ручки было бы хуже болезни.
+ *
+ * @param services - собранные сервисы (нужен пул подключений)
+ * @param logger - логгер приложения
+ */
+async function reportPendingMigrations(services: AppServices, logger: Logger): Promise<void> {
+  try {
+    const pending = (await migrationStatus(services.pool)).filter((row) => !row.applied);
+
+    if (pending.length > 0) {
+      logger.error('СХЕМА УСТАРЕЛА: есть неприменённые миграции — накатите их', {
+        pending: pending.map((row) => `${row.version}_${row.name}`),
+      });
+    }
+  } catch (error) {
+    logger.error('не удалось проверить состояние миграций', { error: (error as Error).message });
+  }
+}
 
 function trackInFlight(server: Server): { count: () => number } {
   let inFlight = 0;
@@ -89,6 +123,8 @@ async function main(): Promise<void> {
   });
 
   const services = await createServices(config, logger);
+
+  await reportPendingMigrations(services, logger);
 
   const server = createServer(toNodeListener(createHttpApp(services)));
   server.keepAliveTimeout = 65_000;

@@ -66,6 +66,8 @@ interface HarnessOptions {
   usedBytes?: bigint;
   nodes?: NodeRow[];
   env?: Record<string, string>;
+  /** Ронять запись выдачи тикета — так ведёт себя недостающая таблица. */
+  grantWriteFails?: boolean;
 }
 
 /**
@@ -117,6 +119,10 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
       // Выдачи запоминаются в памяти: по ним проверяется, вправе ли нода
       // присылать расход по этому аккаунту.
       rememberTicketGrant: async (accountId: string, nodeId: string) => {
+        if (options.grantWriteFails) {
+          throw new Error('relation "ticket_grants" does not exist');
+        }
+
         grants.add(`${accountId}:${nodeId}`);
       },
       filterGrantedAccounts: async (nodeId: string, accountIds: readonly string[]) =>
@@ -350,6 +356,21 @@ describe('POST /api/tunnel/ticket', () => {
     expect(third.status).toBe(429);
     expect((third.body['error'] as Record<string, unknown>)['code']).toBe('rate_limited');
     expect(Number(third.headers.get('retry-after'))).toBeGreaterThan(0);
+  });
+
+  it('тикет выдаётся, даже если запись выдачи не прошла', async () => {
+    // Ровно то, что случилось на боевом стенде: миграция `ticket_grants` не
+    // накаталась, запись падала — и вместе с ней падала ВСЯ выдача тикетов.
+    // Туннель переставал работать у всех подписчиков при исправном сервисе.
+    //
+    // Бухгалтерия не вправе отменять услугу: потерянная запись лишь приведёт к
+    // тому, что расход по этому аккаунту не засчитается.
+    harness = await startApp({ grantWriteFails: true });
+
+    const response = await requestTicket(harness, await userToken());
+
+    expect(response.status).toBe(200);
+    expect(response.body['ticket']).toBeTypeOf('string');
   });
 
   it('лимит по IP срабатывает раньше проверки токена', async () => {
