@@ -60,7 +60,12 @@ claim'а: `sub` (UUID аккаунта) и `username` (по нему прове�
   "issuedAt": "2026-08-08T20:08:24.000Z",
   "expiresAt": "2026-08-08T20:23:24.000Z",
   "ttlSeconds": 900,
-  "node": { "id": "eu-1", "hostname": "eu-1.play.ttg.club", "region": "eu" },
+  "node": {
+    "id": "eu-1",
+    "hostname": "eu-1.play.ttg.club",
+    "region": "eu",
+    "addresses": ["203.0.113.10", "2001:db8::10"]
+  },
   "account": { "slug": "ivan", "host": "ivan.play.ttg.club" },
   "hosts": [
     { "kind": "account", "slug": "ivan", "host": "ivan.play.ttg.club" },
@@ -87,6 +92,12 @@ claim'а: `sub` (UUID аккаунта) и `username` (по нему прове�
 
 `tier` — константа сервиса (`TICKET_TIER`), а не свойство подписки: тарифов у
 `subscriber.api` не существует.
+
+`node.addresses` — публичные IP ноды из её последнего heartbeat. Клиенту стоит
+подключаться прямо к ним, а `hostname` использовать для SNI, заголовка `Host` и
+проверки сертификата: так туннель не зависит от DNS пользователя (кэш провайдера
+или VPN держит старый адрес до часа после смены IP ноды). Пустой массив — нода
+адресов не сообщила, подключаться по `hostname` через DNS.
 
 В блоке `subscription` решение о доступе отражает **только** `active`.
 Остальное — справочное:
@@ -166,11 +177,16 @@ claim'а: `sub` (UUID аккаунта) и `username` (по нему прове�
   "nodeId": "eu-1",
   "hostname": "eu-1.play.ttg.club",
   "region": "eu",
+  "addresses": ["203.0.113.10", "2001:db8::10"],
   "status": "active",
   "tunnels": 3,
   "streams": 12
 }
 ```
+
+`addresses` — до 8 публичных IPv4/IPv6 ноды (`NODE_PUBLIC_ADDRESSES` у ноды);
+дубли убираются, IPv6 приводится к нижнему регистру, не-IP — `400`. Поле
+необязательное: без него список пустой, и клиенты ходят на ноду через DNS.
 
 `status`: `active` | `draining` | `down`, по умолчанию `active`. Неизвестная
 нода заводится этим же запросом. Нода без heartbeat дольше

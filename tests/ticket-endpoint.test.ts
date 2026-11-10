@@ -4,7 +4,7 @@ import { toNodeListener } from 'h3';
 import { SignJWT } from 'jose';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BYTES_IN_GB, TIERS, type TierLimits } from '../src/domain/limits.js';
-import type { NodeRow } from '../src/domain/nodes/repository.js';
+import type { HeartbeatInput, NodeRow } from '../src/domain/nodes/repository.js';
 import type { SlugRow } from '../src/domain/slug/repository.js';
 import { createTicketKeyring } from '../src/domain/ticket/keys.js';
 import { verifyTicket } from '../src/domain/ticket/issue.js';
@@ -24,11 +24,15 @@ const NODE: NodeRow = {
   id: 'eu-1',
   hostname: 'eu-1.play.ttg.club',
   region: 'eu',
+  addresses: ['203.0.113.10', '2001:db8::10'],
   status: 'active',
   lastSeenAt: new Date(),
   tunnels: 0,
   streams: 0,
 };
+
+/** Что сервис записал из heartbeat нод — для проверки разбора адресов. */
+const heartbeats: HeartbeatInput[] = [];
 
 function accountRow(accountId: string, slug: string): SlugRow {
   return { slug, accountId, kind: 'account', parentSlug: null, worldId: null, createdAt: new Date() };
@@ -108,7 +112,10 @@ async function startApp(options: HarnessOptions = {}): Promise<Harness> {
     nodes: {
       listHealthy: async () => options.nodes ?? [NODE],
       get: async () => NODE,
-      upsertHeartbeat: async () => NODE,
+      upsertHeartbeat: async (input: HeartbeatInput) => {
+        heartbeats.push(input);
+        return { ...NODE, ...input, id: input.nodeId, lastSeenAt: new Date() };
+      },
     },
     usage: {
       getAccountUsage: async () => {
@@ -206,7 +213,9 @@ describe('POST /api/tunnel/ticket', () => {
     ]);
 
     expect(status).toBe(200);
-    expect(body['node']).toMatchObject({ id: 'eu-1', hostname: 'eu-1.play.ttg.club' });
+    expect(body['node']).toMatchObject({
+      id: 'eu-1', hostname: 'eu-1.play.ttg.club', addresses: ['203.0.113.10', '2001:db8::10'],
+    });
     expect(body['account']).toEqual({ slug: 'ivan', host: 'ivan.play.ttg.club' });
     // Тариф — константа из конфига: subscriber о тарифах ничего не сообщает.
     expect(body['tier']).toBe('pro');
@@ -381,5 +390,45 @@ describe('POST /api/tunnel/ticket', () => {
     // Другой аккаунт, тот же адрес — лимит общий.
     const second = await requestTicket(harness, await userToken(randomUUID()));
     expect(second.status).toBe(429);
+  });
+});
+
+describe('POST /api/internal/nodes/heartbeat', () => {
+  async function heartbeat(target: Harness, body: Record<string, unknown>): Promise<number> {
+    const response = await fetch(`${target.base}/api/internal/nodes/heartbeat`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${'x'.repeat(48)}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    return response.status;
+  }
+
+  it('сохраняет публичные IP ноды: без дублей и в нижнем регистре', async () => {
+    harness = await startApp();
+    heartbeats.length = 0;
+
+    const status = await heartbeat(harness, {
+      nodeId: 'ru-1', hostname: 'ru-1.play.ttg.club',
+      addresses: ['195.208.122.150', '2A02:408:7722:54::150', '195.208.122.150'],
+    });
+
+    expect(status).toBe(200);
+    expect(heartbeats.at(-1)?.addresses).toEqual(['195.208.122.150', '2a02:408:7722:54::150']);
+  });
+
+  it('старая нода без поля addresses получает пустой список', async () => {
+    harness = await startApp();
+    heartbeats.length = 0;
+
+    expect(await heartbeat(harness, { nodeId: 'ru-1', hostname: 'ru-1.play.ttg.club' })).toBe(200);
+    expect(heartbeats.at(-1)?.addresses).toEqual([]);
+  });
+
+  it('отвергает адрес, который не является IP', async () => {
+    harness = await startApp();
+
+    expect(await heartbeat(harness, {
+      nodeId: 'ru-1', hostname: 'ru-1.play.ttg.club', addresses: ['ru-1.play.ttg.club'],
+    })).toBe(400);
   });
 });

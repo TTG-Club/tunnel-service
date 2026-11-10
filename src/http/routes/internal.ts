@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { Router } from 'h3';
 import { z } from 'zod';
 import { BYTES_IN_GB } from '../../domain/limits.js';
@@ -30,6 +31,15 @@ const heartbeatSchema = z.object({
     .max(253)
     .regex(/^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$/, 'ожидается имя хоста в нижнем регистре'),
   region: z.string().min(1).max(64).nullish(),
+  /**
+   * Публичные IP ноды. По ним приложение мастера подключается в обход DNS
+   * пользователя. Нет поля (старая нода) — пустой список, клиент идёт по имени.
+   */
+  addresses: z
+    .array(z.string().max(45).refine((value) => isIP(value) !== 0, 'ожидается IPv4 или IPv6 адрес'))
+    .max(8)
+    .default([])
+    .transform((list) => [...new Set(list.map((value) => value.toLowerCase()))]),
   status: z.enum(['active', 'draining', 'down']).default('active'),
   tunnels: z.number().int().min(0).max(1_000_000).default(0),
   streams: z.number().int().min(0).max(10_000_000).default(0),
@@ -68,6 +78,7 @@ export function registerInternalRoutes(router: Router, services: AppServices): v
         nodeId: body.nodeId,
         hostname: body.hostname,
         region: body.region ?? null,
+        addresses: body.addresses,
         status: body.status,
         tunnels: body.tunnels,
         streams: body.streams,

@@ -6,6 +6,8 @@ export interface NodeRow {
   readonly id: string;
   readonly hostname: string;
   readonly region: string | null;
+  /** Публичные IP ноды из heartbeat; пусто — клиент идёт через DNS. */
+  readonly addresses: readonly string[];
   readonly status: NodeStatus;
   readonly lastSeenAt: Date | null;
   readonly tunnels: number;
@@ -16,6 +18,7 @@ export interface HeartbeatInput {
   readonly nodeId: string;
   readonly hostname: string;
   readonly region: string | null;
+  readonly addresses: readonly string[];
   readonly status: NodeStatus;
   readonly tunnels: number;
   readonly streams: number;
@@ -32,19 +35,21 @@ interface DbNodeRow {
   id: string;
   hostname: string;
   region: string | null;
+  addresses: string[] | null;
   status: string;
   last_seen_at: Date | null;
   tunnels: number;
   streams: number;
 }
 
-const COLUMNS = 'id, hostname, region, status, last_seen_at, tunnels, streams';
+const COLUMNS = 'id, hostname, region, addresses, status, last_seen_at, tunnels, streams';
 
 function mapRow(row: DbNodeRow): NodeRow {
   return {
     id: row.id,
     hostname: row.hostname,
     region: row.region,
+    addresses: row.addresses ?? [],
     status: row.status as NodeStatus,
     lastSeenAt: row.last_seen_at,
     tunnels: row.tunnels,
@@ -74,17 +79,18 @@ export function createNodeRepository(pool: Pool): NodeRepository {
 
     async upsertHeartbeat(input) {
       const { rows } = await pool.query<DbNodeRow>(
-        `insert into nodes (id, hostname, region, status, last_seen_at, tunnels, streams)
-         values ($1, $2, $3, $4, now(), $5, $6)
+        `insert into nodes (id, hostname, region, addresses, status, last_seen_at, tunnels, streams)
+         values ($1, $2, $3, $7, $4, now(), $5, $6)
          on conflict (id) do update
            set hostname = excluded.hostname,
                region = coalesce(excluded.region, nodes.region),
+               addresses = excluded.addresses,
                status = excluded.status,
                last_seen_at = now(),
                tunnels = excluded.tunnels,
                streams = excluded.streams
          returning ${COLUMNS}`,
-        [input.nodeId, input.hostname, input.region, input.status, input.tunnels, input.streams],
+        [input.nodeId, input.hostname, input.region, input.status, input.tunnels, input.streams, [...input.addresses]],
       );
       return mapRow(rows[0] as DbNodeRow);
     },

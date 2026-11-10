@@ -223,7 +223,9 @@ export function registerTunnelRoutes(router: Router, services: AppServices): voi
         issuedAt: ticket.issuedAt.toISOString(),
         expiresAt: ticket.expiresAt.toISOString(),
         ttlSeconds: config.ticket.ttlSeconds,
-        node: { id: node.id, hostname: node.hostname, region: node.region },
+        // addresses — чтобы клиент подключался по IP, не завися от DNS
+        // пользователя; hostname остаётся для SNI и проверки сертификата.
+        node: { id: node.id, hostname: node.hostname, region: node.region, addresses: node.addresses },
         account: {
           slug: accountSlug.slug,
           host: host(accountSlug.slug, config.publicDomain),
